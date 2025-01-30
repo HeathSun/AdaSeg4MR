@@ -196,6 +196,7 @@ def callback(recognizer, audio):
             segmentation_thread_instance = threading.Thread(target=segmentation_thread)
             segmentation_thread_instance.start()
             visual_context = None
+            return
         elif 'capture webcam' in call:
             print('Capturing webcam...')
             web_cam_capture()
@@ -207,11 +208,10 @@ def callback(recognizer, audio):
             visual_context = None
         else:
             visual_context = None
-        
-        if 'real-time segmentation' not in call:
-            response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
-            print(f'Ada: {response}')
-            speak(response)
+            
+        response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
+        print(f'Ada: {response}')
+        speak(response)
 
     
 # Modify start_listening to use threading for concurrency
@@ -244,6 +244,7 @@ def start_listening():
                     segmentation_thread_instance = threading.Thread(target=segmentation_thread)
                     segmentation_thread_instance.start()
                     visual_context = None
+                    return # Return to avoid redundant response
                 elif 'capture webcam' in call:
                     print('Capturing webcam...')
                     web_cam_capture()
@@ -255,11 +256,10 @@ def start_listening():
                     visual_context = None
                 else:
                     visual_context = None
-                
-                if 'real-time segmentation' not in call:
-                    response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
-                    print(f'Ada: {response}')
-                    speak(response)
+                    
+                response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
+                print(f'Ada: {response}')
+                speak(response)
             else:
                 print("No valid prompt detected.")
 
