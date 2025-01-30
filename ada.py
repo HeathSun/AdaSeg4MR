@@ -168,7 +168,7 @@ def start_segmentation():
     speak("I am starting segmentation, please wait for the results.")  # 立即提示分割开始
 
     # Perform real-time segmentation
-    results = segmentation_model.predict(0, save=True, show=True, conf=0.15)  # 阻塞等待模型完成预测
+    results = segmentation_model.predict(0, save=False, show=True, conf=0.15)  # 阻塞等待模型完成预测
 
     # 处理预测结果
     if results:
@@ -237,11 +237,11 @@ def start_listening():
     else:
         # If voice interaction is disabled, use command line input for testing.
         while True:
-            user_input = input("User: ")
+            user_input = input("Command: ")
             clean_prompt = extract_prompt(user_input, wake_word)
             
             if clean_prompt:
-                print(f'USER: {clean_prompt}')
+                print(f'User: {clean_prompt}')
                 call = function_call(clean_prompt)
                 
                 if 'take screenshot' in call:
