@@ -2,6 +2,8 @@
 
 <img src="AdaSeg4MR.png" alt="Ada" width="100%">
 
+**AdaSeg4MR: Adaptive Speech-Guided Instance Segmentation for Mixed Reality**
+
 This project develops an innovative mixed reality (MR) interaction pipeline that integrates real-time semantic segmentation and natural language interaction for dynamic object tracking and image segmentation.  It aims to create a more intuitive and immersive experience for users interacting with virtual and real-world environments.
 
 ## Project Goals
