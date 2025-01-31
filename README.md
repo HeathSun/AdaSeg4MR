@@ -6,7 +6,7 @@ This project develops an innovative mixed reality (MR) interaction pipeline that
 
 ## Project Goals
 
-<img src="Workflow.png" alt="Workflow" width="80%">
+<img src="Workflow.png" alt="Workflow" width="100%">
 
 * **Advanced Semantic Segmentation:** Leverage state-of-the-art models like the Segment Anything Model (SAM) and FastSAM to achieve accurate and adaptable object recognition in varying conditions.
 * **Natural Language Interaction:** Implement a natural language processing (NLP) module to interpret user voice commands related to object tracking and image segmentation, enabling real-time responses and seamless interaction.
@@ -16,7 +16,9 @@ This project develops an innovative mixed reality (MR) interaction pipeline that
 * **User-Guided Visual Search:** Support user-guided visual searches within an egocentric perception framework for more immersive and intuitive interactions.
 * **Novel Computer Vision Approaches:** Explore innovative real-time semantic segmentation implementations, such as visual Retrieval-Augmented Generation (RAG) and multimodal prompting.
 
-## System Architecture and Distribution Plan
+## Distribution Plan
+
+<img src="Resources.png" alt="Resources" width="85%">
 
 Due to limited computing resources, the project employs a distributed computing strategy.  This plan may be adjusted if additional resources are secured.
 
@@ -37,7 +39,7 @@ Due to limited computing resources, the project employs a distributed computing 
 
 ## Technologies Used
 
-<img src="Demo.png" alt="Demo" width="80%">
+<img src="Demo.png" alt="Demo" width="100%">
 
 * **Semantic Segmentation Models:** Segment Anything Model (SAM), FastSAM, YOLOv11-Seg, GroundedSAM, POSE
 * **Natural Language Processing:** LangChain, RAG
