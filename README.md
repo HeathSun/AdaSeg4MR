@@ -4,7 +4,7 @@
 
 **AdaSeg4MR: Adaptive Speech-Guided Instance Segmentation for Mixed Reality**
 
-This project develops an innovative mixed reality (MR) pipeline that integrates real-time instance segmentation and voice-guided natural language interaction.  It aims to create a more intuitive and immersive experience for users interacting with virtual and real-world environments.
+This project develops an innovative mixed reality (MR) pipeline that integrates real-time instance segmentation and speech-guided natural language interaction.  It aims to create a more intuitive and immersive experience for users interacting with virtual and real-world environments.
 
 ## Project Goals
 
