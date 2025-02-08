@@ -1,0 +1,20 @@
+# 忽略配置文件（API 密钥等）
+config.json
+
+# 忽略 Python 生成的缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 忽略日志文件
+*.log
+
+# 忽略 Jupyter Notebook 输出
+.ipynb_checkpoints/
+
+# 忽略 VSCode 相关文件
+.vscode/
+
+# 忽略本地环境文件
+.env
