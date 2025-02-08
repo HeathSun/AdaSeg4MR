@@ -11,16 +11,23 @@ import os
 import threading
 import time
 import re
+import json
 from ultralytics import YOLO
 segmentation_model = YOLO("yolo11m-seg.pt") 
 
 wake_word = 'Ada'
-groq_client = Groq(api_key="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")
-genai.configure(api_key="AIzaSyC58SeZxg_0fhw5AZfXfmMT1-uB3EVOrww")
-openai_client = OpenAI(api_key="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")
-web_cam = cv2.VideoCapture(0)
+def load_config():
+    with open('config.json') as f:
+        return json.load(f)
+
+config = load_config()
+groq_client = Groq(api_key=config['groq_api_key'])
+genai.configure(api_key=config['google_api_key'])
+openai_client = OpenAI(api_key=config['openai_api_key'])
+web_cam = cv2.VideoCapture(1)
 # Add a global variable to control voice interaction
 use_voice_interaction = False  # Set this to False to disable voice interaction
+stop_event = threading.Event()
 
 sys_msg = (
     'You are a multi-modal AI voice assistant named Ada, after the British computer scientist Ada Lovelace,'
@@ -31,6 +38,89 @@ sys_msg = (
     'Do not expect or request images, just use the context if added.Use all of the context of this conversation so your response is relevant to the conversation.'
     ' Make your responses clear and concise, avoiding any verbosity.'
 )
+
+CLASSES = {
+    'person': 0,
+    'bicycle': 1,
+    'car': 2,
+    'motorcycle': 3,
+    'airplane': 4,
+    'bus': 5,
+    'train': 6,
+    'truck': 7,
+    'boat': 8,
+    'traffic light': 9,
+    'fire hydrant': 10,
+    'stop sign': 11,
+    'parking meter': 12,
+    'bench': 13,
+    'bird': 14,
+    'cat': 15,
+    'dog': 16,
+    'horse': 17,
+    'sheep': 18,
+    'cow': 19,
+    'elephant': 20,
+    'bear': 21,
+    'zebra': 22,
+    'giraffe': 23,
+    'backpack': 24,
+    'umbrella': 25,
+    'handbag': 26,
+    'tie': 27,
+    'suitcase': 28,
+    'frisbee': 29,
+    'skis': 30,
+    'snowboard': 31,
+    'sports ball': 32,
+    'kite': 33,
+    'baseball bat': 34,
+    'baseball glove': 35,
+    'skateboard': 36,
+    'surfboard': 37,
+    'tennis racket': 38,
+    'bottle': 39,
+    'wine glass': 40,
+    'cup': 41,
+    'fork': 42,
+    'knife': 43,
+    'spoon': 44,
+    'bowl': 45,
+    'banana': 46,
+    'apple': 47,
+    'sandwich': 48,
+    'orange': 49,
+    'broccoli': 50,
+    'carrot': 51,
+    'hot dog': 52,
+    'pizza': 53,
+    'donut': 54,
+    'cake': 55,
+    'chair': 56,
+    'couch': 57,
+    'potted plant': 58,
+    'bed': 59,
+    'dining table': 60,
+    'toilet': 61,
+    'tv': 62,
+    'laptop': 63,
+    'mouse': 64,
+    'remote': 65,
+    'keyboard': 66,
+    'cell phone': 67,
+    'microwave': 68,
+    'oven': 69,
+    'toaster': 70,
+    'sink': 71,
+    'refrigerator': 72,
+    'book': 73,
+    'clock': 74,
+    'vase': 75,
+    'scissors': 76,
+    'teddy bear': 77,
+    'hair drier': 78,
+    'toothbrush': 79
+}
 
 convo = [{'role': 'system', 'content': sys_msg}]
 
@@ -92,7 +182,7 @@ def function_call(prompt):
         'You are an AI function calling model. You will determine whether extracting the users clipboard content, '
         'taking a screenshot, capturing the webcam or calling no functions is best for a voice assistant to respond '
         'to the users prompt, The webcam can be assumed to be a normal laptop webcam facing the user. You will '
-        'respond with only one selection from this list: ["extract clipboard", "real-time segmentation", "take screenshot", "capture webcam", "None"] \n'
+        'respond with only one selection from this list: ["extract clipboard", "real-time segmentation", "well done","take screenshot", "capture webcam", "None"] \n'
         'Do not respond with anything but the most logical selection from that list with no explanations. Format the'
         'function call name exactly as I listed.'
     )
@@ -165,16 +255,76 @@ def wav_to_text(audio_path):
     return text
     
 # Function to handle segmentation in a separate thread
-def segmentation_thread():
-    start_segmentation()
+def segmentation_thread(prompt):
+    global stop_event
+    stop_event.clear()  # Reset event
+    start_segmentation(prompt)
     
-def start_segmentation():
+def parse_target_classes(prompt):
+    """Extract target class IDs from user prompt"""
+    target_classes = []
+    prompt = prompt.lower()
+    
+    # Check each class name in mapping
+    for class_name, class_id in CLASSES.items():
+        if class_name in prompt:
+            target_classes.append(class_id)
+            
+    return target_classes if target_classes else None
+    
+def get_class_names(target_classes):
+    """Convert class IDs to names"""
+    names = []
+    for class_id in target_classes:
+        for name, id in CLASSES.items():
+            if id == class_id:
+                names.append(name)
+                break
+    return names
+    
+def start_segmentation(prompt):
     print("Starting segmentation...")
-    speak("I am starting segmentation, please wait for the results.")  # 立即提示分割开始
-
-    # Perform real-time segmentation
-    results = segmentation_model.predict(0, save=False, show=True, verbose=False, conf=0.15)  # 阻塞等待模型完成预测
     
+    # Get target classes if prompt provided
+    target_classes = parse_target_classes(prompt) if prompt else None
+    
+    if target_classes is None:
+        speak("I am starting segmentation, please wait for the results.")
+    else:
+        class_names = get_class_names(target_classes)
+        if len(class_names) == 1:
+            speak(f"I am starting segmentation to find the {class_names[0]} for you.")
+        else:
+            targets_str = ", ".join(class_names[:-1]) + f" and {class_names[-1]}"
+            speak(f"I am starting segmentation to find {targets_str} for you.")
+
+
+    while not stop_event.is_set():
+        try:
+            results = segmentation_model.predict(
+                source=0,
+                save=False,
+                show=True,
+                verbose=False,
+                conf=0.15,
+                classes=target_classes,  # Filter specific classes
+                stream=True
+            )
+            for r in results:
+                if stop_event.is_set():
+                    break
+                cv2.waitKey(1)
+        except Exception as e:
+            print(f"Segmentation error: {e}")
+            break
+            
+    cv2.destroyAllWindows()
+    print("Segmentation stopped")
+
+def stop_segmentation():
+    stop_event.set()  # Signal thread to stop
+    speak("Stopping segmentation")
+        
 def callback(recognizer, audio):
     prompt_audio_path = 'prompt.wav'
     with open(prompt_audio_path, 'wb') as f:
@@ -193,8 +343,12 @@ def callback(recognizer, audio):
             visual_context = vision_prompt(prompt=clean_prompt, photo_path='screenshot.png')
         elif 'real-time segmentation' in call:
             # Start segmentation in a new thread to avoid blocking
-            segmentation_thread_instance = threading.Thread(target=segmentation_thread)
+            segmentation_thread_instance = threading.Thread(target=segmentation_thread, kwargs={'prompt': clean_prompt})
             segmentation_thread_instance.start()
+            visual_context = None
+        elif 'well done' in call:
+            print('Thank you...')
+            stop_segmentation()
             visual_context = None
         elif 'capture webcam' in call:
             print('Capturing webcam...')
@@ -208,7 +362,7 @@ def callback(recognizer, audio):
         else:
             visual_context = None
         
-        if 'real-time segmentation' not in call:
+        if ('real-time segmentation' not in call) and ('well done' not in call):
             response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
             print(f'Ada: {response}')
             speak(response)
@@ -241,8 +395,12 @@ def start_listening():
                     visual_context = vision_prompt(prompt=clean_prompt, photo_path='screenshot.png')
                 elif 'real-time segmentation' in call:
                     # Start segmentation in a new thread to avoid blocking
-                    segmentation_thread_instance = threading.Thread(target=segmentation_thread)
+                    segmentation_thread_instance = threading.Thread(target=segmentation_thread, kwargs={'prompt': clean_prompt})
                     segmentation_thread_instance.start()
+                    visual_context = None
+                elif 'well done' in call:
+                    print('Thank you...')
+                    stop_segmentation()
                     visual_context = None
                 elif 'capture webcam' in call:
                     print('Capturing webcam...')
@@ -256,7 +414,7 @@ def start_listening():
                 else:
                     visual_context = None
                 
-                if 'real-time segmentation' not in call:
+                if ('real-time segmentation' not in call) and ('well done' not in call):
                     response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
                     print(f'Ada: {response}')
                     speak(response)
