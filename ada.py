@@ -285,7 +285,104 @@ Respond ONLY with the intent name (e.g., "find_objects", "general_chat", etc.) w
         print(f"Error detecting intent: {e}")
         return "general_chat"  # 默认为一般对话
 
-# 修改function_call函数，整合新的意图检测
+# 修改translate_user_classes函数，优化多类别处理
+def translate_user_classes(prompt):
+    """
+    将用户输入的非标准类别名称转译为YOLO支持的标准类别
+    例如："men and women" -> "person", "laptop computer" -> "laptop"
+    支持多类别识别，如："find people and cars" -> ["person", "car"]
+    """
+    # 构建系统提示
+    classes_list = ", ".join(CLASSES.keys())
+    sys_prompt = f"""
+You are a computer vision assistant. Your task is to map user's natural language descriptions 
+to the standard YOLO object detection classes.
+
+Available YOLO classes: {classes_list}
+
+Rules:
+1. Map user terms to the closest matching YOLO class(es)
+2. Consider synonyms, plurals, and related terms
+3. Return ONLY the matching class name(s) without any explanation
+4. If multiple classes match, return them separated by commas
+5. If no classes match, return "NONE"
+6. Be comprehensive - identify ALL relevant classes mentioned in the query
+
+Examples:
+- "men and women" -> "person"
+- "laptop computer" -> "laptop"
+- "dining table with food" -> "dining table"
+- "coca cola bottle" -> "bottle"
+- "mobile phone" -> "cell phone"
+- "golden retriever" -> "dog"
+- "unicorn" -> "NONE"
+- "find people and cars" -> "person, car"
+- "look for cats and dogs" -> "cat, dog"
+"""
+
+    user_prompt = f"User query: {prompt}\nMatching YOLO classes:"
+    
+    # 调用Groq API进行分析
+    try:
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=messages,
+            temperature=0.1,  # 低温度以获得更确定的结果
+            max_tokens=50
+        )
+        
+        # 解析响应
+        mapped_classes = response.choices[0].message.content.strip()
+        
+        # 如果没有匹配的类别
+        if mapped_classes.upper() == "NONE":
+            return None
+        
+        # 分割多个类别
+        class_list = [cls.strip() for cls in mapped_classes.split(',')]
+        
+        # 验证返回的类别是否在CLASSES中
+        valid_classes = []
+        for cls in class_list:
+            if cls in CLASSES:
+                valid_classes.append(cls)
+        
+        return valid_classes if valid_classes else None
+    
+    except Exception as e:
+        print(f"Error translating user classes: {e}")
+        return None
+
+# 修改parse_target_classes函数，集成类别转译功能
+def parse_target_classes(prompt):
+    """Extract target class IDs from user prompt with translation support"""
+    # 先尝试直接匹配
+    target_classes = []
+    prompt = prompt.lower()
+    
+    # 检查每个类名是否在提示中
+    for class_name, class_id in CLASSES.items():
+        if class_name in prompt:
+            target_classes.append(class_id)
+    
+    # 如果没有直接匹配到，尝试使用转译
+    if not target_classes:
+        translated_classes = translate_user_classes(prompt)
+        if translated_classes:
+            for class_name in translated_classes:
+                class_id = CLASSES.get(class_name)
+                if class_id is not None:
+                    target_classes.append(class_id)
+    
+    # 如果找到了类别，则返回，否则返回None
+    return target_classes if target_classes else None
+
+# 修改function_call函数中的实时分割部分，增加对未支持类别的处理
 def function_call(prompt):
     # 保持原有的直接匹配逻辑
     # 检查是否是描述框架请求
@@ -301,8 +398,14 @@ def function_call(prompt):
     
     # 检查是否是查找请求
     if 'find' in prompt_lower and 'for me' in prompt_lower:
+        # 检查是否请求查找不支持的对象
+        translated_classes = translate_user_classes(prompt)
+        if translated_classes is None:
+            # 这是一个不支持分割的对象，返回visual question
+            return "visual question"
         return "real-time segmentation"
     
+    # 其余代码保持不变
     if any(keyword in prompt_lower for keyword in location_keywords):
         for class_name in CLASSES.keys():
             if class_name in prompt_lower:
@@ -322,6 +425,11 @@ def function_call(prompt):
     
     # 根据检测到的意图返回对应的功能
     if intent == "find_objects":
+        # 检查是否请求查找不支持的对象
+        translated_classes = translate_user_classes(prompt)
+        if translated_classes is None:
+            # 这是一个不支持分割的对象，返回visual question
+            return "visual question"
         return "real-time segmentation"
     elif intent == "describe_scene":
         return "describe frame"
@@ -467,18 +575,6 @@ def segmentation_thread(prompt):
         else:
             print(f"Segmentation error: {e}")
     
-def parse_target_classes(prompt):
-    """Extract target class IDs from user prompt"""
-    target_classes = []
-    prompt = prompt.lower()
-    
-    # Check each class name in mapping
-    for class_name, class_id in CLASSES.items():
-        if class_name in prompt:
-            target_classes.append(class_id)
-            
-    return target_classes if target_classes else None
-    
 def get_class_names(target_classes):
     """Convert class IDs to names"""
     names = []
@@ -594,9 +690,9 @@ def display_video_thread():
     cv2.destroyAllWindows()
     web_cam.release()
     
-# 添加一个函数来处理分割结果的可视化
+# 修改process_segmentation_results函数，确保正确处理多类别掩码
 def process_segmentation_results(results, frame):
-    """将分割结果可视化到叠加层"""
+    """将分割结果可视化到叠加层，支持多类别同时显示"""
     if results is None:
         return None
         
@@ -607,6 +703,21 @@ def process_segmentation_results(results, frame):
     
     # 处理每个检测到的物体
     try:
+        # 处理分割掩码（如果有）- 先处理掩码再处理边界框，避免边界框被掩码覆盖
+        if hasattr(results, 'masks') and results.masks is not None:
+            for i, mask in enumerate(results.masks.data):
+                class_id = int(results.boxes.cls[i])
+                color = CLASS_COLORS[class_id]
+                
+                # 转换掩码为numpy数组并调整大小
+                mask_np = mask.cpu().numpy()
+                mask_np = cv2.resize(mask_np, (width, height), interpolation=cv2.INTER_LINEAR)
+                mask_np = mask_np > 0.5  # 二值化
+                
+                # 应用掩码并保持不同类别的颜色区分
+                alpha = 0.4  # 降低透明度，使多个类别可以区分
+                overlay[mask_np] = (overlay[mask_np] * 0.5 + np.array(color) * 0.5).astype(np.uint8)
+        
         # 处理边界框
         for i, box in enumerate(results.boxes.xyxy):
             # 获取类别ID和名称
@@ -671,26 +782,6 @@ def process_segmentation_results(results, frame):
                 thickness,
                 cv2.LINE_AA
             )
-        
-        # 处理分割掩码（如果有）
-        if hasattr(results, 'masks') and results.masks is not None:
-            for i, mask in enumerate(results.masks.data):
-                class_id = int(results.boxes.cls[i])
-                color = CLASS_COLORS[class_id]
-                
-                # 转换掩码为numpy数组并调整大小
-                mask_np = mask.cpu().numpy()
-                mask_np = cv2.resize(mask_np, (width, height), interpolation=cv2.INTER_LINEAR)
-                mask_np = mask_np > 0.5  # 二值化
-                
-                # 创建彩色掩码
-                colored_mask = np.zeros_like(overlay)
-                colored_mask[mask_np] = color
-                
-                # 设置掩码区域的透明度
-                alpha = 0.5
-                mask_area = mask_np.astype(bool)
-                overlay[mask_area] = overlay[mask_area] * (1 - alpha) + colored_mask[mask_area] * alpha
     
     except Exception as e:
         print(f"Error in processing segmentation results: {e}")
@@ -718,9 +809,9 @@ def get_best_detection():
                 
     return best_result
 
-# 修改start_segmentation函数，添加结果缓冲
+# 修改start_segmentation函数，优化多类别处理
 def start_segmentation(prompt):
-    """开始分割对象"""
+    """开始分割对象，支持多类别检测"""
     global segmentation_model, segmentation_mode, current_results, stop_event, overlay_frame
     global continuous_segmentation, detection_buffer
     
@@ -740,6 +831,8 @@ def start_segmentation(prompt):
     if target_classes is None:
         print(f"No specific object class detected in prompt. Showing all detectable objects.")
         target_classes = list(CLASSES.values())
+    else:
+        print(f"Target classes: {target_classes}")
         
     # 获取目标类别名称
     target_names = get_class_names(target_classes)
