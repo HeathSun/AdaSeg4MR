@@ -72,7 +72,7 @@ waiting_sound_thread = None
 stop_waiting_sound = threading.Event()
 
 # 在全局变量区域添加录制控制标志
-ENABLE_RECORDING = False  # 设置为False可以禁用视频和音频的录制
+ENABLE_RECORDING = True  # 设置为False可以禁用视频和音频的录制
 
 sys_msg = (
     'You are a multi-modal AI voice assistant named Ada, after the British computer scientist Ada Lovelace,'
@@ -525,11 +525,11 @@ def setup_video_writer():
         return None
         
     # 确保recordings目录存在
-    os.makedirs('./runs/recordings', exist_ok=True)
+    os.makedirs('../runs/recordings', exist_ok=True)
     
     # 生成带时间戳的文件名
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    current_video_path = f'./runs/recordings/recording_{timestamp}.mp4'
+    current_video_path = f'../runs/recordings/recording_{timestamp}.mp4'
     
     # 获取视频参数
     width = int(web_cam.get(cv2.CAP_PROP_FRAME_WIDTH))
