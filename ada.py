@@ -242,10 +242,56 @@ def groq_prompt(prompt, img_context):
     
     return response.content
     
+# 添加意图匹配函数
+def detect_intent(prompt):
+    """使用Groq API来检测用户意图"""
+    sys_msg = ('''
+You are an intent classification AI. Analyze the user's input and determine which of the following intents it most closely matches:
+1. find_objects - User wants to find or locate specific objects in their view
+2. describe_scene - User wants a description of what's currently visible
+3. count_objects - User wants to count specific objects
+4. position_query - User wants to know where specific objects are located
+5. take_screenshot - User wants to capture a screenshot
+6. clipboard_extract - User wants to extract text from clipboard
+7. quit_request - User wants to exit the program
+8. general_chat - None of the above, user just wants a normal conversation
+9. real-time segmentation - User wants to segment all objects in real-time
+10. visual_question - User is asking a specific question about what they can see
+Respond ONLY with the intent name (e.g., "find_objects", "general_chat", etc.) without any explanation.
+    ''')
+    
+    intent_convo = [
+        {'role': 'system', 'content': sys_msg},
+        {'role': 'user', 'content': prompt}
+    ]
+    
+    try:
+        chat_completion = groq_client.chat.completions.create(
+            messages=intent_convo, 
+            model='llama-3.1-8b-instant',
+            temperature=0.1,  # 低温度以获得更确定的结果
+            max_tokens=10     # 只需要简短的答案
+        )
+        intent = chat_completion.choices[0].message.content.strip().lower()
+        print(f"Detected intent: {intent}")
+        return intent
+    except Exception as e:
+        print(f"Error detecting intent: {e}")
+        return "general_chat"  # 默认为一般对话
+
+# 修改function_call函数，整合新的意图检测
 def function_call(prompt):
+    # 保持原有的直接匹配逻辑
+    # 检查是否是描述框架请求
+    description_keywords = ['describe frame', 'what do you see', 'analyze scene', 'describe scene']
+    prompt_lower = prompt.lower()
+    
+    # 如果包含描述关键词
+    if any(keyword in prompt_lower for keyword in description_keywords):
+        return "describe frame"
+    
     # 添加位置查询的检测
     location_keywords = ['where', 'location', 'position']
-    prompt_lower = prompt.lower()
     
     # 检查是否是查找请求
     if 'find' in prompt_lower and 'for me' in prompt_lower:
@@ -265,38 +311,51 @@ def function_call(prompt):
             if class_name in prompt_lower:
                 return "count objects"
     
-    sys_msg = (
-        'You are an AI function calling model. You will determine whether extracting the users clipboard content, '
-        'taking a screenshot, capturing the webcam or calling no functions is best for a voice assistant to respond '
-        'to the users prompt, The webcam can be assumed to be a normal laptop webcam facing the user. You will '
-        'respond with only one selection from this list: ["extract clipboard", "real-time segmentation", "well done",'
-        '"take screenshot", "capture webcam", "count objects", "position query", "quit", "None"] \n'
-        'Do not respond with anything but the most logical selection from that list with no explanations. Format the'
-        'function call name exactly as I listed.'
-    )
+    # 使用AI意图检测
+    intent = detect_intent(prompt)
     
-    function_convo = [{'role': 'system', 'content': sys_msg},
-                        {'role': 'user', 'content': prompt}]
-                        
-    chat_completion = groq_client.chat.completions.create(messages=function_convo, model='llama3-70b-8192')
-    response = chat_completion.choices[0].message
-    
-    return response.content
+    # 根据检测到的意图返回对应的功能
+    if intent == "find_objects":
+        return "real-time segmentation"
+    elif intent == "describe_scene":
+        return "describe frame"
+    elif intent == "visual_question":
+        return "visual question"
+    elif intent == "count_objects":
+        return "count objects"
+    elif intent == "position_query":
+        return "position query"
+    elif intent == "take_screenshot":
+        return "take screenshot"
+    elif intent == "clipboard_extract":
+        return "extract clipboard"
+    elif intent == "quit_request":
+        return "quit"
+    else:  # general_chat或其他任何情况
+        # 回退到原有的功能调用逻辑
+        sys_msg = (
+            'You are an AI function calling model. You will determine whether extracting the users clipboard content, '
+            'taking a screenshot, calling no functions is best for a voice assistant to respond '
+            'to the users prompt, The webcam can be assumed to be a normal laptop webcam facing the user. You will '
+            'respond with only one selection from this list: ["extract clipboard", "real-time segmentation", "well done",'
+            '"take screenshot", "count objects", "position query", "quit", "None"] \n'
+            'Do not respond with anything but the most logical selection from that list with no explanations. Format the'
+            'function call name exactly as I listed.'
+        )
+        
+        function_convo = [{'role': 'system', 'content': sys_msg},
+                           {'role': 'user', 'content': prompt}]
+                           
+        chat_completion = groq_client.chat.completions.create(messages=function_convo, model='llama3-70b-8192')
+        response = chat_completion.choices[0].message
+        
+        return response.content
 
 def take_screenshot():
     path = 'screenshot.png'
     screenshot = ImageGrab.grab()
     rgb_screenshot = screenshot.convert('RGB')
     rgb_screenshot.save(path, quality = 15)
-    
-def web_cam_capture():
-    if not web_cam.isOpened():
-        print('Error: Could not open webcam')
-        exit()
-    
-    path = 'webcam_capture.png'
-    ret, frame = web_cam.read()
-    cv2.imwrite(path, frame)
     
 def get_clipboard():
     clipboard_content = pyperclip.paste()
@@ -388,10 +447,17 @@ def wav_to_text(audio_path):
     
 # Function to handle segmentation in a separate thread
 def segmentation_thread(prompt):
-    global stop_event
-    stop_event.clear()  # Reset event
-    start_segmentation(prompt)
-    
+    """在单独的线程中执行分割"""
+    try:
+        start_segmentation(prompt)
+    except Exception as e:
+        # 简化错误消息，避免大量重复输出
+        if "object of type 'NoneType' has no len()" in str(e):
+            # 静默处理缺少检测到的物体的常见情况
+            pass
+        else:
+            print(f"Segmentation error: {e}")
+
 def parse_target_classes(prompt):
     """Extract target class IDs from user prompt"""
     target_classes = []
@@ -535,10 +601,10 @@ def start_segmentation(prompt):
     else:
         class_names = get_class_names(target_classes)
         if len(class_names) == 1:
-            speak(f"I am starting segmentation to find the {class_names[0]} for you.")
+            speak(f"I found the {class_names[0]} for you.")
         else:
             targets_str = ", ".join(class_names[:-1]) + f" and {class_names[-1]}"
-            speak(f"I am starting segmentation to find {targets_str} for you.")
+            speak(f"I found {targets_str} for you.")
 
     while not stop_event.is_set():
         try:
@@ -554,6 +620,11 @@ def start_segmentation(prompt):
                 classes=target_classes,
                 retina_masks=True
             )
+            
+            # 添加结果检查
+            if results is None or len(results) == 0:
+                # 处理没有结果的情况
+                continue
             
             # 更新当前结果
             current_results = results[0] if len(results) > 0 else None
@@ -722,12 +793,8 @@ def draw_arrow(frame, target_center, color=(255, 255, 255), thickness=3):
     if length == 0:
         return frame
     
-    # 标准化长度（使箭头长度适中）
-    desired_length = min(width, height) * 0.2
-    dx = dx * desired_length / length
-    dy = dy * desired_length / length
-    
-    end_point = (int(start_point[0] + dx), int(start_point[1] + dy))
+    # 箭头终点就是目标中心点
+    end_point = target_center
     
     # 绘制箭头
     cv2.arrowedLine(frame, start_point, end_point, color, thickness, tipLength=0.3)
@@ -747,14 +814,25 @@ def get_position_descriptor(index, total_count):
         elif total_count % 2 == 1 and index == total_count // 2:
             return "middle"
         else:
-            # 从右边数是第几个
-            from_right = total_count - index - 1
-            if from_right == 1:
-                return "second from the right"
-            elif from_right == 2:
-                return "third from the right"
+            # 判断物体在画面左半边还是右半边
+            if index < total_count // 2:
+                # 在左半边,从左数第几个
+                from_left = index + 1
+                if from_left == 2:
+                    return "second from the left"
+                elif from_left == 3:
+                    return "third from the left" 
+                else:
+                    return f"{from_left}th from the left"
             else:
-                return f"{from_right + 1}th from the right"
+                # 在右半边,从右数第几个
+                from_right = total_count - index
+                if from_right == 2:
+                    return "second from the right"
+                elif from_right == 3:
+                    return "third from the right"
+                else:
+                    return f"{from_right}th from the right"
 
 def get_relative_position(target_box, other_boxes, other_classes):
     """找到最近的其他物体并描述相对位置"""
@@ -806,7 +884,11 @@ def get_relative_position(target_box, other_boxes, other_classes):
     # 如果两边都有物体
     left_class_name = [name for name, id in CLASSES.items() if id == int(left_class)][0]
     right_class_name = [name for name, id in CLASSES.items() if id == int(right_class)][0]
-    return f" between the {left_class_name} and the {right_class_name}"
+    
+    if left_class_name == right_class_name:
+        return f" between two {left_class_name}s"
+    else:
+        return f" between the {left_class_name} and the {right_class_name}"
 
 def get_object_positions(class_name):
     """获取特定类别物体的位置描述"""
@@ -899,58 +981,50 @@ def handle_position_query(clean_prompt):
 # 在callback和start_listening中添加位置查询的处理
 def callback(recognizer, audio):
     try:
-    prompt_audio_path = 'prompt.wav'
-    with open(prompt_audio_path, 'wb') as f:
-        f.write(audio.get_wav_data())
+        prompt_audio_path = 'prompt.wav'
+        with open(prompt_audio_path, 'wb') as f:
+            f.write(audio.get_wav_data())
+            
+        prompt_text = wav_to_text(prompt_audio_path)
+        clean_prompt = extract_prompt(prompt_text, wake_word)
         
-    prompt_text = wav_to_text(prompt_audio_path)
-    clean_prompt = extract_prompt(prompt_text, wake_word)
-    
-    if clean_prompt:
+        if clean_prompt:
             chat_history.append(f"User: {clean_prompt}")
-        print(f'USER: {clean_prompt}')
-        call = function_call(clean_prompt)
-        
+            print(f'USER: {clean_prompt}')
+            call = function_call(clean_prompt)
+            
             if 'position query' in call:
                 if handle_position_query(clean_prompt):
                     return
             elif 'count objects' in call:
                 if handle_count_query(clean_prompt):
                     return
-            elif 'capture webcam' in call:
-                print('Capturing current frame...')
-                if frame_buffer is not None:
-                    cv2.imwrite('current_frame.png', frame_buffer)
-                    visual_context = vision_prompt(prompt=clean_prompt, photo_path='current_frame.png')
-                else:
-                    visual_context = None
             elif 'take screenshot' in call:
-            print('Taking screenshot...')
-            take_screenshot()
-            visual_context = vision_prompt(prompt=clean_prompt, photo_path='screenshot.png')
-        elif 'real-time segmentation' in call:
-            segmentation_thread_instance = threading.Thread(target=segmentation_thread, kwargs={'prompt': clean_prompt})
-            segmentation_thread_instance.start()
-            visual_context = None
-        elif 'well done' in call:
-            print('Thank you...')
-            stop_segmentation()
-            visual_context = None
-        elif 'extract clipboard' in call:
-            print('Copying clipboard text...')
-            paste = get_clipboard()
-            clean_prompt = f'{clean_prompt}\n\n CLIPBOARD CONTENT: {paste}'
-            visual_context = None
+                print('Taking screenshot...')
+                take_screenshot()
+                visual_context = vision_prompt(prompt=clean_prompt, photo_path='screenshot.png')
+            elif 'real-time segmentation' in call:
+                segmentation_thread_instance = threading.Thread(target=segmentation_thread, kwargs={'prompt': clean_prompt})
+                segmentation_thread_instance.start()
+                visual_context = None
+            elif 'well done' in call:
+                print('Thank you...')
+                stop_segmentation()
+                visual_context = None
+            elif 'extract clipboard' in call:
+                print('Copying clipboard text...')
+                paste = get_clipboard()
+                clean_prompt = f'{clean_prompt}\n\n CLIPBOARD CONTENT: {paste}'
+                visual_context = None
             elif 'quit' in call.lower():
                 quit_program()
-        else:
-            visual_context = None
-        
-        if ('real-time segmentation' not in call) and ('well done' not in call):
-            response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
-            print(f'Ada: {response}')
-            speak(response)
-
+            else:
+                visual_context = None
+            
+            if ('real-time segmentation' not in call) and ('well done' not in call):
+                response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
+                print(f'Ada: {response}')
+                speak(response)
     except Exception as e:
         print(f"Error in voice recognition: {e}")
 
@@ -1020,10 +1094,10 @@ def start_listening():
         while True:
             time.sleep(.5)
     else:
-        # If voice interaction is disabled, use command line input for testing.
+        # 修改命令行输入处理部分
         while True:
             user_input = input("Command: ")
-            clean_prompt = extract_prompt(user_input, wake_word)  # 现在会检查唤醒词
+            clean_prompt = extract_prompt(user_input, wake_word)
             
             if clean_prompt:
                 chat_history.append(f"User: {clean_prompt}")
@@ -1031,20 +1105,17 @@ def start_listening():
                 
                 call = function_call(clean_prompt)
                 
-                if 'position query' in call:
+                # 添加对describe frame的处理
+                if 'describe frame' in call:
+                    describe_frame()
+                    continue
+                elif 'position query' in call:
                     if handle_position_query(clean_prompt):
                         continue
                 elif 'count objects' in call:
                     if handle_count_query(clean_prompt):
                         continue
-                elif 'capture webcam' in call:
-                    print('Capturing current frame...')
-                    if frame_buffer is not None:
-                        cv2.imwrite('current_frame.png', frame_buffer)
-                        visual_context = vision_prompt(prompt=clean_prompt, photo_path='current_frame.png')
-                    else:
-                        visual_context = None
-                elif 'quit' in call.lower():  # 添加退出命令处理
+                elif 'quit' in call.lower():
                     quit_program()
                     break
                 
@@ -1066,6 +1137,9 @@ def start_listening():
                     paste = get_clipboard()
                     clean_prompt = f'{clean_prompt}\n\n CLIPBOARD CONTENT: {paste}'
                     visual_context = None
+                elif 'visual question' in call:
+                    answer_visual_question(clean_prompt)
+                    continue
                 else:
                     visual_context = None
                 
@@ -1075,8 +1149,6 @@ def start_listening():
                     # 添加Ada的回复到对话历史
                     chat_history.append(f"Ada: {response}")
                     speak(response)
-            else:
-                print(f"Please start your command with '{wake_word}'")
 
 def extract_prompt(transcribed_text, wake_word):
     """直接返回转录的文本"""
@@ -1185,19 +1257,19 @@ def handle_audio(audio):
             # 开始播放等待音效
             start_waiting_sound()
             
-            if 'position query' in call:
+            # 添加对新功能的处理
+            if 'describe frame' in call:
+                describe_frame()
+                return
+            elif 'visual question' in call:
+                answer_visual_question(clean_prompt)
+                return
+            elif 'position query' in call:
                 if handle_position_query(clean_prompt):
                     return
             elif 'count objects' in call:
                 if handle_count_query(clean_prompt):
                     return
-            elif 'capture webcam' in call:
-                print('Capturing current frame...')
-                if frame_buffer is not None:
-                    cv2.imwrite('current_frame.png', frame_buffer)
-                    visual_context = vision_prompt(prompt=clean_prompt, photo_path='current_frame.png')
-                else:
-                    visual_context = None
             elif 'take screenshot' in call:
                 print('Taking screenshot...')
                 take_screenshot()
@@ -1217,15 +1289,124 @@ def handle_audio(audio):
                 visual_context = None
             elif 'quit' in call.lower():
                 quit_program()
-    else:
+            else:
                 visual_context = None
             
             if ('real-time segmentation' not in call) and ('well done' not in call):
                 response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
                 print(f'Ada: {response}')
                 speak(response)
-
     except Exception as e:
         print(f"Error in voice recognition: {e}")
         
+# 添加以下函数来处理"describe frame"功能
+def describe_frame():
+    """分析并描述当前视频帧"""
+    global frame_buffer
+    
+    if frame_buffer is None:
+        speak("I can't see anything right now.")
+        return
+    
+    # 保存当前帧
+    frame_path = 'current_frame_analysis.png'
+    cv2.imwrite(frame_path, frame_buffer)
+    
+    print("Analyzing what I can see...")
+    
+    try:
+        # 准备API请求
+        from base64 import b64encode
+        
+        # 读取图像并编码为base64
+        with open(frame_path, "rb") as image_file:
+            image_data = b64encode(image_file.read()).decode('utf-8')
+        
+        # 使用Groq的视觉模型API
+        messages = [
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "text", "text": "Describe what you see in the current frame with a very concise description in one sentence."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
+                ]
+            }
+        ]
+        
+        response = groq_client.chat.completions.create(
+            model="llama-3.2-90b-vision-preview",
+            messages=messages,
+            max_tokens=300
+        )
+        
+        description = response.choices[0].message.content
+        print(f"Ada: {description}")
+        speak(description)
+        
+    except Exception as e:
+        error_message = f"I encountered an error analyzing the image: {str(e)}"
+        print(error_message)
+        speak(error_message)
+    
+    # 清理临时文件
+    try:
+        os.remove(frame_path)
+    except:
+        pass
+
+# 添加新函数来回答关于视频帧的具体问题
+def answer_visual_question(question):
+    """分析当前视频帧并回答用户的具体问题"""
+    global frame_buffer
+    
+    if frame_buffer is None:
+        speak("I can't see anything right now to answer your question.")
+        return
+    
+    # 保存当前帧
+    frame_path = 'current_frame_question.png'
+    cv2.imwrite(frame_path, frame_buffer)
+    
+    print(f"Analyzing frame to answer: {question}")
+    
+    try:
+        # 准备API请求
+        from base64 import b64encode
+        
+        # 读取图像并编码为base64
+        with open(frame_path, "rb") as image_file:
+            image_data = b64encode(image_file.read()).decode('utf-8')
+        
+        # 使用Groq的视觉模型API，包含用户的具体问题
+        messages = [
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "text", "text": f"Look at this image and answer this question very concisely: {question}"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
+                ]
+            }
+        ]
+        
+        response = groq_client.chat.completions.create(
+            model="llama-3.2-90b-vision-preview",
+            messages=messages,
+            max_tokens=100
+        )
+        
+        answer = response.choices[0].message.content
+        print(f"Ada: {answer}")
+        speak(answer)
+        
+    except Exception as e:
+        error_message = f"I encountered an error analyzing the image: {str(e)}"
+        print(error_message)
+        speak(error_message)
+    
+    # 清理临时文件
+    try:
+        os.remove(frame_path)
+    except:
+        pass
+
 start_listening()
