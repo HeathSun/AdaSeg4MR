@@ -18,3 +18,69 @@ __pycache__/
 
 # 忽略本地环境文件
 .env
+
+# 忽略录制文件
+runs/recordings/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+
+# 忽略图像文件
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.webp
+
+# 忽略音频文件
+*.wav
+*.mp3
+*.aac
+*.flac
+*.ogg
+
+# 忽略临时文件
+prompt.wav
+screenshot.png
+current_frame.png
+webcam_capture.png
+detector.wav
+detector.mp3
+
+# 忽略模型文件(通常很大)
+*.pt
+*.pth
+*.h5
+*.onnx
+*.bin
+
+# 忽略Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 忽略系统文件
+.DS_Store
+Thumbs.db
