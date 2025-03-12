@@ -72,7 +72,13 @@ waiting_sound_thread = None
 stop_waiting_sound = threading.Event()
 
 # 在全局变量区域添加录制控制标志
-ENABLE_RECORDING = True  # 设置为False可以禁用视频和音频的录制
+ENABLE_RECORDING = False  # 设置为False可以禁用视频和音频的录制
+
+# 在全局变量区域添加
+continuous_segmentation = False  # 控制是否持续分割
+
+# 在全局变量区域添加
+detection_buffer = deque(maxlen=5)  # 存储最近5帧的检测结果
 
 sys_msg = (
     'You are a multi-modal AI voice assistant named Ada, after the British computer scientist Ada Lovelace,'
@@ -344,8 +350,8 @@ def function_call(prompt):
         )
         
         function_convo = [{'role': 'system', 'content': sys_msg},
-                           {'role': 'user', 'content': prompt}]
-                           
+                          {'role': 'user', 'content': prompt}]
+                          
         chat_completion = groq_client.chat.completions.create(messages=function_convo, model='llama3-70b-8192')
         response = chat_completion.choices[0].message
         
@@ -449,15 +455,18 @@ def wav_to_text(audio_path):
 def segmentation_thread(prompt):
     """在单独的线程中执行分割"""
     try:
-        start_segmentation(prompt)
+        result = start_segmentation(prompt)
+        if result is None or (hasattr(result, 'boxes') and len(result.boxes) == 0):
+            print("No objects were detected during segmentation.")
+            speak("I couldn't find any of the objects you were looking for.")
     except Exception as e:
         # 简化错误消息，避免大量重复输出
         if "object of type 'NoneType' has no len()" in str(e):
             # 静默处理缺少检测到的物体的常见情况
-            pass
+            print("No objects detected in this frame.")
         else:
             print(f"Segmentation error: {e}")
-
+    
 def parse_target_classes(prompt):
     """Extract target class IDs from user prompt"""
     target_classes = []
@@ -585,117 +594,277 @@ def display_video_thread():
     cv2.destroyAllWindows()
     web_cam.release()
     
-def start_segmentation(prompt):
-    global overlay_frame, current_results
+# 添加一个函数来处理分割结果的可视化
+def process_segmentation_results(results, frame):
+    """将分割结果可视化到叠加层"""
+    if results is None:
+        return None
+        
+    # 创建透明叠加层
+    overlay = np.zeros_like(frame)
     
-    # 如果已经在进行分割，先停止当前的分割
-    if not stop_event.is_set():
-        stop_event.set()
-        time.sleep(0.1)  # 给一点时间让之前的线程停止
-        stop_event.clear()
+    height, width = frame.shape[:2]
     
-    target_classes = parse_target_classes(prompt) if prompt else None
-    
-    if target_classes is None:
-        speak("I am starting segmentation, please wait for the results.")
-    else:
-        class_names = get_class_names(target_classes)
-        if len(class_names) == 1:
-            speak(f"I found the {class_names[0]} for you.")
-        else:
-            targets_str = ", ".join(class_names[:-1]) + f" and {class_names[-1]}"
-            speak(f"I found {targets_str} for you.")
-
-    while not stop_event.is_set():
-        try:
-            if frame_buffer is None:
+    # 处理每个检测到的物体
+    try:
+        # 处理边界框
+        for i, box in enumerate(results.boxes.xyxy):
+            # 获取类别ID和名称
+            class_id = int(results.boxes.cls[i])
+            conf = float(results.boxes.conf[i])  # 获取置信度
+            
+            # 获取对应的类别名称
+            class_name = None
+            for name, id in CLASSES.items():
+                if id == class_id:
+                    class_name = name
+                    break
+                    
+            if class_name is None:
                 continue
                 
-            results = segmentation_model.predict(
-                source=frame_buffer,
-                save=False,
-                show=False,
-                verbose=False,
-                conf=0.15,
-                classes=target_classes,
-                retina_masks=True
+            # 设置颜色
+            color = CLASS_COLORS[class_id]
+            
+            # 获取边界框坐标
+            x1, y1, x2, y2 = map(int, box)
+            
+            # 绘制边界框
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
+            
+            # 添加置信度文本
+            conf_text = f"{class_name}: {conf:.2f}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.5
+            thickness = 2
+            
+            # 计算文本尺寸
+            (text_width, text_height), baseline = cv2.getTextSize(
+                conf_text, font, font_scale, thickness
             )
             
-            # 添加结果检查
-            if results is None or len(results) == 0:
-                # 处理没有结果的情况
-                continue
+            # 文本位置（在框的上方）
+            text_x = x1
+            text_y = y1 - 5
             
-            # 更新当前结果
-            current_results = results[0] if len(results) > 0 else None
-            
-            # 创建透明遮罩层
-            overlay = np.zeros_like(frame_buffer, dtype=np.uint8)
-            
-            for r in results:
-                if len(r.masks) == 0:  # 如果没有检测到目标，跳过
-                    continue
-                    
-                # 获取原始图像尺寸
-                height, width = frame_buffer.shape[:2]
+            # 确保文本在图像内
+            if text_y < text_height:
+                text_y = y1 + text_height + 5
                 
-                # 处理每个检测结果
-                for mask, box, cls in zip(r.masks.data, r.boxes.data, r.boxes.cls):
-                    # 获取类别ID和对应的固定颜色
-                    class_id = int(cls)
-                    color = CLASS_COLORS[class_id]
-                    class_name = [name for name, id in CLASSES.items() if id == class_id][0]
-                    
-                    # 直接使用YOLO的分割mask，保持原始精度
-                    mask = mask.cpu().numpy()  # [H, W]
-                    mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_LINEAR)
-                    mask_bool = mask > 0.5
-                    
-                    # 直接应用不透明的颜色遮罩
-                    overlay[mask_bool] = color
-                    
-                    # 绘制边界框
-                    x1, y1, x2, y2 = map(int, box[:4])
-                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
-                    
-                    # 添加类别标签
-                    label = f"{class_name}"
-                    (text_width, text_height), baseline = cv2.getTextSize(
-                        label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
-                    )
-                    cv2.rectangle(
-                        overlay,
-                        (x1, y1 - text_height - baseline - 5),
-                        (x1 + text_width, y1),
-                        color,
-                        -1
-                    )
-                    cv2.putText(
-                        overlay,
-                        label,
-                        (x1, y1 - baseline - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (255, 255, 255),
-                        2
-                    )
+            # 绘制文本背景
+            cv2.rectangle(
+                overlay, 
+                (text_x, text_y - text_height - baseline),
+                (text_x + text_width, text_y + baseline),
+                color, 
+                -1
+            )
             
-            overlay_frame = overlay
-                    
-        except Exception as e:
-            print(f"Segmentation error: {e}")
-            continue
+            # 绘制文本
+            cv2.putText(
+                overlay,
+                conf_text,
+                (text_x, text_y),
+                font,
+                font_scale,
+                (255, 255, 255),
+                thickness,
+                cv2.LINE_AA
+            )
+        
+        # 处理分割掩码（如果有）
+        if hasattr(results, 'masks') and results.masks is not None:
+            for i, mask in enumerate(results.masks.data):
+                class_id = int(results.boxes.cls[i])
+                color = CLASS_COLORS[class_id]
+                
+                # 转换掩码为numpy数组并调整大小
+                mask_np = mask.cpu().numpy()
+                mask_np = cv2.resize(mask_np, (width, height), interpolation=cv2.INTER_LINEAR)
+                mask_np = mask_np > 0.5  # 二值化
+                
+                # 创建彩色掩码
+                colored_mask = np.zeros_like(overlay)
+                colored_mask[mask_np] = color
+                
+                # 设置掩码区域的透明度
+                alpha = 0.5
+                mask_area = mask_np.astype(bool)
+                overlay[mask_area] = overlay[mask_area] * (1 - alpha) + colored_mask[mask_area] * alpha
+    
+    except Exception as e:
+        print(f"Error in processing segmentation results: {e}")
+    
+    return overlay
 
+# 添加函数来获取最佳检测结果（物体最多的那一帧）
+def get_best_detection():
+    """从缓冲区中获取物体检测最多的结果"""
+    global detection_buffer
+    
+    if not detection_buffer:
+        return None
+        
+    # 找出包含最多物体的结果
+    max_objects = 0
+    best_result = None
+    
+    for result in detection_buffer:
+        if result is not None and hasattr(result, 'boxes'):
+            num_objects = len(result.boxes)
+            if num_objects > max_objects:
+                max_objects = num_objects
+                best_result = result
+                
+    return best_result
+
+# 修改start_segmentation函数，添加结果缓冲
+def start_segmentation(prompt):
+    """开始分割对象"""
+    global segmentation_model, segmentation_mode, current_results, stop_event, overlay_frame
+    global continuous_segmentation, detection_buffer
+    
+    # 清空检测缓冲区
+    detection_buffer.clear()
+    
+    # 重置停止事件
+    stop_event.clear()
+    
+    # 启用连续分割模式
+    continuous_segmentation = True
+
+    # 解析目标类别
+    target_classes = parse_target_classes(prompt)
+    
+    # 如果没有指定目标类别，使用所有类别
+    if target_classes is None:
+        print(f"No specific object class detected in prompt. Showing all detectable objects.")
+        target_classes = list(CLASSES.values())
+        
+    # 获取目标类别名称
+    target_names = get_class_names(target_classes)
+    print(f"Looking for: {', '.join(target_names)}")
+    speak(f"Looking for {', '.join(target_names)}")
+    
+    segmentation_mode = True
+    segmentation_start_time = time.time()
+    first_detection = False
+    
+    try:
+        # 连续处理帧，直到收到停止信号
+        while not stop_event.is_set():
+            if frame_buffer is None:
+                time.sleep(0.1)
+                continue
+                
+            # 处理当前帧
+            try:
+                # 添加超时检查，长时间找不到则停止
+                if time.time() - segmentation_start_time > 30 and not first_detection:
+                    print("Segmentation timeout - no objects found within 30 seconds.")
+                    speak("I couldn't find the objects you're looking for after searching for 30 seconds.")
+                    break
+                    
+                # 预测结果
+                results = segmentation_model.predict(
+                    source=frame_buffer,
+                    save=False,
+                    show=False,
+                    verbose=False,
+                    conf=0.15,
+                    classes=target_classes,
+                    retina_masks=True
+                )
+                
+                # 添加结果检查
+                if results is None or len(results) == 0:
+                    # 处理没有结果的情况
+                    overlay_frame = None  # 清除叠加层
+                    detection_buffer.append(None)  # 将空结果添加到缓冲区
+                    continue
+                
+                # 检查是否找到了任何物体
+                if len(results[0].boxes) == 0:
+                    # 没有找到物体，清除叠加层并继续下一帧
+                    overlay_frame = None
+                    detection_buffer.append(None)  # 将空结果添加到缓冲区
+                    continue
+                
+                # 更新当前结果
+                current_results = results[0] if len(results) > 0 else None
+                
+                # 将当前结果添加到缓冲区
+                if current_results is not None:
+                    detection_buffer.append(current_results)
+                
+                # 处理分割结果并更新叠加层
+                overlay_frame = process_segmentation_results(current_results, frame_buffer)
+                
+                # 如果找到物体，通知用户（仅第一次）
+                if current_results is not None and len(current_results.boxes) > 0 and not first_detection:
+                    first_detection = True
+                    
+                    # 统计检测到的每种类别的数量
+                    found_classes = {}
+                    for cls in current_results.boxes.cls:
+                        class_id = int(cls)
+                        class_name = [name for name, id in CLASSES.items() if id == class_id][0]
+                        found_classes[class_name] = found_classes.get(class_name, 0) + 1
+                    
+                    # 构建检测结果消息
+                    detection_message = "I found "
+                    class_details = []
+                    for class_name, count in found_classes.items():
+                        if count == 1:
+                            class_details.append(f"a {class_name}")
+                        else:
+                            class_details.append(f"{count} {class_name}s")
+                    
+                    detection_message += ", ".join(class_details)
+                    
+                    print(f"Detection result: {detection_message}")
+                    speak(detection_message)
+                
+                # 如果不是连续模式且已找到物体，则退出循环
+                if not continuous_segmentation and first_detection:
+                    break
+                
+            except Exception as e:
+                # 只在非NoneType错误时打印错误信息
+                if "object of type 'NoneType' has no len()" not in str(e):
+                    print(f"Segmentation processing error: {e}")
+                # 继续处理下一帧
+                continue
+                
+            # 短暂休眠，减少CPU使用率
+            time.sleep(0.05)
+            
+    except Exception as e:
+        # 捕获其他异常
+        print(f"Segmentation error: {e}")
+    finally:
+        # 结束分割模式
+        segmentation_mode = False
+        if not continuous_segmentation:
+            overlay_frame = None  # 如果不是连续模式，清除叠加层
+        return current_results
+
+# 修改stop_segmentation函数
 def stop_segmentation():
+    """停止分割并清除显示结果"""
+    global stop_event, overlay_frame, continuous_segmentation
+    
     stop_event.set()  # Signal thread to stop
+    continuous_segmentation = False  # 禁用连续分割模式
+    overlay_frame = None  # 清除叠加层
     speak("Stopping segmentation")
-    # 清除最后一帧的分割结果
-    global overlay_frame
-    overlay_frame = None
 
 def get_instance_count(class_name):
-    """获取当前场景中特定类别的实例数量"""
-    if current_results is None:
+    """获取当前场景中特定类别的实例数量，使用多帧缓冲技术"""
+    # 获取最佳检测结果（物体最多的那一帧）
+    best_result = get_best_detection()
+    
+    if best_result is None:
         return 0
         
     class_id = CLASSES.get(class_name.lower())
@@ -703,7 +872,7 @@ def get_instance_count(class_name):
         return 0
         
     # 统计指定类别的实例数量
-    count = sum(1 for cls in current_results.boxes.cls if int(cls) == class_id)
+    count = sum(1 for cls in best_result.boxes.cls if int(cls) == class_id)
     return count
 
 def format_count_response(count, class_name):
@@ -891,10 +1060,13 @@ def get_relative_position(target_box, other_boxes, other_classes):
         return f" between the {left_class_name} and the {right_class_name}"
 
 def get_object_positions(class_name):
-    """获取特定类别物体的位置描述"""
+    """获取特定类别物体的位置描述，使用多帧缓冲技术"""
     global overlay_frame  # 需要修改overlay_frame来添加箭头
     
-    if current_results is None:
+    # 获取最佳检测结果（物体最多的那一帧）
+    best_result = get_best_detection()
+    
+    if best_result is None:
         return "I don't see any objects currently being segmented."
         
     class_id = CLASSES.get(class_name.lower())
@@ -909,7 +1081,7 @@ def get_object_positions(class_name):
     
     height, width = frame_buffer.shape[:2]
     
-    for box, cls in zip(current_results.boxes.data, current_results.boxes.cls):
+    for box, cls in zip(best_result.boxes.data, best_result.boxes.cls):
         if int(cls) == class_id:
             target_boxes.append(box)
             x1, y1, x2, y2 = map(int, box[:4])
@@ -993,6 +1165,7 @@ def callback(recognizer, audio):
             print(f'USER: {clean_prompt}')
             call = function_call(clean_prompt)
             
+            # 处理不同的功能调用
             if 'position query' in call:
                 if handle_position_query(clean_prompt):
                     return
@@ -1021,6 +1194,7 @@ def callback(recognizer, audio):
             else:
                 visual_context = None
             
+            # 处理需要LLM响应的情况
             if ('real-time segmentation' not in call) and ('well done' not in call):
                 response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
                 print(f'Ada: {response}')
@@ -1257,8 +1431,12 @@ def handle_audio(audio):
             # 开始播放等待音效
             start_waiting_sound()
             
-            # 添加对新功能的处理
-            if 'describe frame' in call:
+            # 处理实例推理请求
+            if call.startswith("instance_reasoning:"):
+                target_class = call.split(":", 1)[1]
+                instance_reasoning(clean_prompt, target_class)
+                return
+            elif 'describe frame' in call:
                 describe_frame()
                 return
             elif 'visual question' in call:
@@ -1289,13 +1467,13 @@ def handle_audio(audio):
                 visual_context = None
             elif 'quit' in call.lower():
                 quit_program()
-            else:
-                visual_context = None
-            
-            if ('real-time segmentation' not in call) and ('well done' not in call):
-                response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
-                print(f'Ada: {response}')
-                speak(response)
+        else:
+            visual_context = None
+        
+        if ('real-time segmentation' not in call) and ('well done' not in call):
+            response = groq_prompt(prompt=clean_prompt, img_context=visual_context)
+            print(f'Ada: {response}')
+            speak(response)
     except Exception as e:
         print(f"Error in voice recognition: {e}")
         
@@ -1408,5 +1586,178 @@ def answer_visual_question(question):
         os.remove(frame_path)
     except:
         pass
+        
+# 添加新的实例推理函数
+def instance_reasoning(question, target_class):
+    """分析特定类别的每个实例并提供描述"""
+    global current_results, frame_buffer
+    
+    if current_results is None or frame_buffer is None:
+        speak("I don't have any segmentation results to analyze yet.")
+        return
+    
+    # 获取该类别在CLASSES中的ID
+    target_class_id = None
+    for class_name, class_id in CLASSES.items():
+        if class_name.lower() == target_class.lower():
+            target_class_id = class_id
+            break
+    
+    if target_class_id is None:
+        speak(f"I don't recognize {target_class} as a known object class.")
+        return
+    
+    # 从分割结果中提取指定类别的所有框
+    boxes = []
+    class_ids = []
+    
+    # 检查是否有boxes属性
+    if hasattr(current_results, 'boxes') and current_results.boxes is not None:
+        for i, cls in enumerate(current_results.boxes.cls):
+            if int(cls) == target_class_id:
+                box = current_results.boxes.xyxy[i].cpu().numpy()
+                boxes.append(box)
+                class_ids.append(int(cls))
+    
+    if not boxes:
+        speak(f"I couldn't find any {target_class} in the current segmentation results.")
+        return
+    
+    # 根据x坐标排序（从左到右）
+    sorted_indices = sorted(range(len(boxes)), key=lambda i: boxes[i][0])
+    
+    instance_descriptions = []
+    position_descriptors = get_position_descriptors(len(boxes))
+    
+    print(f"Analyzing {len(boxes)} {target_class} instances...")
+    
+    # 处理每个实例
+    for i, idx in enumerate(sorted_indices):
+        box = boxes[idx]
+        x1, y1, x2, y2 = map(int, box)
+        
+        # 确保边界不超出图像范围
+        height, width = frame_buffer.shape[:2]
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(width, x2)
+        y2 = min(height, y2)
+        
+        # 裁剪边界框
+        cropped_instance = frame_buffer[y1:y2, x1:x2]
+        
+        if cropped_instance.size == 0:
+            continue
+            
+        # 保存裁剪区域
+        instance_path = f'instance_{i}.png'
+        cv2.imwrite(instance_path, cropped_instance)
+        
+        # 分析单个实例
+        description = analyze_instance(instance_path, target_class, position_descriptors[i])
+        instance_descriptions.append(description)
+        
+        # 清理临时文件
+        try:
+            os.remove(instance_path)
+        except:
+            pass
+    
+    # 整合所有实例描述
+    if len(instance_descriptions) == 1:
+        final_description = f"The {target_class} {instance_descriptions[0]}"
+    else:
+        final_description = "; ".join(instance_descriptions)
+    
+    # 缓存结果到记忆文件
+    cache_instance_reasoning(target_class, final_description)
+    
+    print(f"Ada: {final_description}")
+    speak(final_description)
+    return final_description
 
+def analyze_instance(image_path, class_name, position):
+    """分析单个实例并返回描述"""
+    try:
+        from base64 import b64encode
+        
+        # 读取图像并编码为base64
+        with open(image_path, "rb") as image_file:
+            image_data = b64encode(image_file.read()).decode('utf-8')
+        
+        # 使用Groq的视觉模型API分析实例
+        messages = [
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "text", "text": f"Analyze this cropped image of a {class_name}. Describe its notable visual features (color, condition, shape, etc.) in one brief phrase."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
+                ]
+            }
+        ]
+        
+        response = groq_client.chat.completions.create(
+            model="llama-3.2-90b-vision-preview",
+            messages=messages,
+            max_tokens=50
+        )
+        
+        features = response.choices[0].message.content.strip()
+        
+        # 构建描述
+        return f"{position} is {features}"
+        
+    except Exception as e:
+        print(f"Error analyzing instance: {e}")
+        return f"{position} is visible"
+
+def get_position_descriptors(count):
+    """根据物体数量生成位置描述词"""
+    if count == 1:
+        return [""]
+    elif count == 2:
+        return ["on the left", "on the right"]
+    elif count == 3:
+        return ["on the left", "in the middle", "on the right"]
+    else:
+        result = []
+        for i in range(count):
+            if i == 0:
+                result.append("on the far left")
+            elif i == count - 1:
+                result.append("on the far right")
+            elif i == 1:
+                result.append("on the left")
+            elif i == count - 2:
+                result.append("on the right")
+            else:
+                relative_position = (i / (count - 1)) * 100
+                result.append(f"at position {i+1} from the left")
+        return result
+
+def cache_instance_reasoning(target_class, description):
+    """缓存实例推理结果到JSON文件"""
+    cache_file = "instance_memory.json"
+    
+    # 加载现有缓存或创建新缓存
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r') as f:
+                memory = json.load(f)
+        except:
+            memory = {}
+    else:
+        memory = {}
+    
+    # 更新缓存
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    memory[timestamp] = {
+        "class": target_class,
+        "description": description
+    }
+    
+    # 保存缓存
+    with open(cache_file, 'w') as f:
+        json.dump(memory, f, indent=2)
+        
 start_listening()
