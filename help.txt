@@ -1,0 +1,3 @@
+python lovelace.py --mode simple
+python lovelace.py --mode quick --workers 8
+python lovelace.py --mode full --workers 12

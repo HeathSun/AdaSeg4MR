@@ -81,6 +81,15 @@ continuous_segmentation = False  # 控制是否持续分割
 # 在全局变量区域添加
 detection_buffer = deque(maxlen=5)  # 存储最近5帧的检测结果
 
+# 在全局变量区域添加图像模式相关变量
+IMAGE_MODE = True  # 默认为图像模式而非相机模式
+image_files = []  # 存储所有图片文件路径
+current_image_index = 0  # 当前显示的图片索引
+current_image = None  # 当前加载的图片
+
+# 在全局变量区域添加标志，用于跟踪分割状态
+segmentation_active = False  # 跟踪分割是否处于活动状态
+
 sys_msg = (
     'You are a multi-modal AI voice assistant named Ada, after the British computer scientist Ada Lovelace,'
     ' Your user may or may not have attached a photo for context '
@@ -562,7 +571,7 @@ def wav_to_text(audio_path):
     
 # Function to handle segmentation in a separate thread
 def segmentation_thread(prompt):
-    """在单独的线程中执行分割"""
+    """在单独的线程中执行分割，支持相机和图片模式"""
     try:
         result = start_segmentation(prompt)
         if result is None or (hasattr(result, 'boxes') and len(result.boxes) == 0):
@@ -648,40 +657,92 @@ def setup_video_writer():
     return current_video_path
 
 def display_video_thread():
-    """持续显示视频流的线程函数"""
-    global frame_buffer, overlay_frame, should_exit, recording_started, video_writer
+    """持续显示视频流或图片的线程函数"""
+    global frame_buffer, overlay_frame, should_exit, recording_started, video_writer, IMAGE_MODE, current_image, segmentation_active
     
-    cv2.namedWindow('Ada Video Feed', cv2.WINDOW_NORMAL)
-    cv2.resizeWindow('Ada Video Feed', 1280, 720)
+    cv2.namedWindow('Ada Visual Feed', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('Ada Visual Feed', 1280, 720)
     
-    # 初始化视频写入器
-    if not recording_started and ENABLE_RECORDING:
+    # 初始化视频写入器 - 只在相机模式下需要
+    if not IMAGE_MODE and not recording_started and ENABLE_RECORDING:
         output_path = setup_video_writer()
         print(f"Recording to: {output_path}")
         recording_started = True
     elif not ENABLE_RECORDING:
         print("Video recording is disabled.")
     
+    # 如果是图像模式但没有图片，显示提示
+    if IMAGE_MODE and current_image is None:
+        print("No images loaded. Please add images to the test_images folder.")
+    
+    last_overlay = None  # 保存最后一个有效的叠加层
+    
     while not should_exit:
-        ret, frame = web_cam.read()
-        if not ret:
-            continue
+        if IMAGE_MODE:
+            # 图像模式 - 使用当前加载的图片
+            if current_image is None:
+                # 如果没有图片，显示黑屏
+                frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+                cv2.putText(frame, "No image loaded", (480, 360), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            else:
+                # 在图像模式下使用深拷贝，防止原图被修改
+                frame = current_image.copy()
+                
+            # 保持帧缓冲区更新
+            frame_buffer = frame.copy()
+            display_frame = frame.copy()
             
-        frame_buffer = frame.copy()
-        display_frame = frame.copy()
+            # 图像模式下，如果分割处于活动状态且当前没有叠加层，使用最后保存的叠加层
+            if segmentation_active and overlay_frame is None and last_overlay is not None:
+                overlay_frame = last_overlay.copy()
+        else:
+            # 相机模式 - 使用视频流
+            ret, frame = web_cam.read()
+            if not ret:
+                continue
+                
+            frame_buffer = frame.copy()
+            display_frame = frame.copy()
         
         # 如果有分割结果，叠加显示
         if overlay_frame is not None:
-            display_frame = cv2.addWeighted(display_frame, 0.7, overlay_frame, 0.3, 0)
-            
+            try:
+                # 保存当前叠加层以便稍后恢复 - 先拷贝再使用
+                current_overlay = overlay_frame.copy()  # 安全拷贝，避免中途被修改
+                
+                if IMAGE_MODE and segmentation_active:
+                    last_overlay = current_overlay.copy()
+                
+                # 确保两个帧的尺寸相同
+                if current_overlay.shape != display_frame.shape:
+                    # 调整overlay_frame的尺寸以匹配display_frame
+                    current_overlay = cv2.resize(current_overlay, (display_frame.shape[1], display_frame.shape[0]))
+                
+                # 图像模式下增加透明度以便更清晰看到分割效果
+                alpha = 0.4 if IMAGE_MODE else 0.3
+                display_frame = cv2.addWeighted(display_frame, 1-alpha, current_overlay, alpha, 0)
+            except Exception as e:
+                print(f"Overlay error: {e}")
+        
         # 添加对话历史
         display_frame = add_text_to_frame(display_frame, list(chat_history))
+        
+        # 如果是图像模式，添加导航提示
+        if IMAGE_MODE and image_files:
+            height, width = display_frame.shape[:2]
+            cv2.putText(display_frame, 
+                       f"Image {current_image_index+1}/{len(image_files)}", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(display_frame, 
+                       "Use 'next' or 'previous' to navigate", 
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
         # 写入帧到视频文件
         if video_writer is not None and ENABLE_RECORDING:
             video_writer.write(display_frame)
         
-        cv2.imshow('Ada Video Feed', display_frame)
+        cv2.imshow('Ada Visual Feed', display_frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
     
@@ -690,13 +751,21 @@ def display_video_thread():
         video_writer.release()
     cv2.destroyAllWindows()
     web_cam.release()
-    
+
 # 修改process_segmentation_results函数，确保正确处理多类别掩码
 def process_segmentation_results(results, frame):
-    """将分割结果可视化到叠加层，支持多类别同时显示"""
+    """将分割结果可视化到叠加层"""
+    global segmentation_active, current_results
+    
     if results is None:
         return None
-        
+    
+    # 标记分割为活动状态
+    segmentation_active = True
+    
+    # 保存结果以供后续查询使用
+    current_results = results
+    
     # 创建透明叠加层
     overlay = np.zeros_like(frame)
     
@@ -812,9 +881,9 @@ def get_best_detection():
 
 # 修改start_segmentation函数，优化多类别处理
 def start_segmentation(prompt):
-    """开始分割对象，支持多类别检测"""
+    """开始分割对象，支持相机和图片模式"""
     global segmentation_model, segmentation_mode, current_results, stop_event, overlay_frame
-    global continuous_segmentation, detection_buffer
+    global continuous_segmentation, detection_buffer, IMAGE_MODE, segmentation_active
     
     # 清空检测缓冲区
     detection_buffer.clear()
@@ -822,9 +891,13 @@ def start_segmentation(prompt):
     # 重置停止事件
     stop_event.clear()
     
-    # 启用连续分割模式
-    continuous_segmentation = True
-
+    # 图像模式下设置持久分割
+    if IMAGE_MODE:
+        continuous_segmentation = False  # 图像模式不需要持续分割
+        segmentation_mode = True  # 但需要保持分割模式开启
+    else:
+        continuous_segmentation = True  # 相机模式需要持续分割
+    
     # 解析目标类别
     target_classes = parse_target_classes(prompt)
     
@@ -845,94 +918,154 @@ def start_segmentation(prompt):
     first_detection = False
     
     try:
-        # 连续处理帧，直到收到停止信号
-        while not stop_event.is_set():
+        # 图像模式下只需处理一次
+        if IMAGE_MODE:
             if frame_buffer is None:
-                time.sleep(0.1)
-                continue
+                speak("No image available for segmentation.")
+                return None
                 
-            # 处理当前帧
-            try:
-                # 添加超时检查，长时间找不到则停止
-                if time.time() - segmentation_start_time > 30 and not first_detection:
-                    print("Segmentation timeout - no objects found within 30 seconds.")
-                    speak("I couldn't find the objects you're looking for after searching for 30 seconds.")
-                    break
-                    
-                # 预测结果
-                results = segmentation_model.predict(
-                    source=frame_buffer,
-                    save=False,
-                    show=False,
-                    verbose=False,
-                    conf=0.15,
-                    classes=target_classes,
-                    retina_masks=True
-                )
-                
-                # 添加结果检查
-                if results is None or len(results) == 0:
-                    # 处理没有结果的情况
-                    overlay_frame = None  # 清除叠加层
-                    detection_buffer.append(None)  # 将空结果添加到缓冲区
-                    continue
-                
-                # 检查是否找到了任何物体
-                if len(results[0].boxes) == 0:
-                    # 没有找到物体，清除叠加层并继续下一帧
-                    overlay_frame = None
-                    detection_buffer.append(None)  # 将空结果添加到缓冲区
-                    continue
-                
-                # 更新当前结果
-                current_results = results[0] if len(results) > 0 else None
-                
-                # 将当前结果添加到缓冲区
-                if current_results is not None:
-                    detection_buffer.append(current_results)
-                
-                # 处理分割结果并更新叠加层
-                overlay_frame = process_segmentation_results(current_results, frame_buffer)
-                
-                # 如果找到物体，通知用户（仅第一次）
-                if current_results is not None and len(current_results.boxes) > 0 and not first_detection:
-                    first_detection = True
-                    
-                    # 统计检测到的每种类别的数量
-                    found_classes = {}
-                    for cls in current_results.boxes.cls:
-                        class_id = int(cls)
-                        class_name = [name for name, id in CLASSES.items() if id == class_id][0]
-                        found_classes[class_name] = found_classes.get(class_name, 0) + 1
-                    
-                    # 构建检测结果消息
-                    detection_message = "I found "
-                    class_details = []
-                    for class_name, count in found_classes.items():
-                        if count == 1:
-                            class_details.append(f"a {class_name}")
-                        else:
-                            class_details.append(f"{count} {class_name}s")
-                    
-                    detection_message += ", ".join(class_details)
-                    
-                    print(f"Detection result: {detection_message}")
-                    speak(detection_message)
-                
-                # 如果不是连续模式且已找到物体，则退出循环
-                if not continuous_segmentation and first_detection:
-                    break
-                
-            except Exception as e:
-                # 只在非NoneType错误时打印错误信息
-                if "object of type 'NoneType' has no len()" not in str(e):
-                    print(f"Segmentation processing error: {e}")
-                # 继续处理下一帧
-                continue
-                
-            # 短暂休眠，减少CPU使用率
-            time.sleep(0.05)
+            # 预测结果
+            results = segmentation_model.predict(
+                source=frame_buffer,
+                save=False,
+                show=False,
+                verbose=False,
+                conf=0.15,
+                classes=target_classes,
+                retina_masks=True
+            )
             
+            # 检查结果
+            if results is None or len(results) == 0 or len(results[0].boxes) == 0:
+                speak("I couldn't find any of those objects in this image.")
+                return None
+                
+            # 更新当前结果 - 确保在图像模式下正确保存
+            current_results = results[0]
+            
+            # 处理分割结果并更新叠加层
+            overlay_frame = process_segmentation_results(current_results, frame_buffer)
+            
+            # 统计检测到的每种类别的数量
+            found_classes = {}
+            for cls in current_results.boxes.cls:
+                class_id = int(cls)
+                class_name = [name for name, id in CLASSES.items() if id == class_id][0]
+                found_classes[class_name] = found_classes.get(class_name, 0) + 1
+            
+            # 构建检测结果消息
+            detection_message = "I found "
+            class_details = []
+            for class_name, count in found_classes.items():
+                if count == 1:
+                    class_details.append(f"a {class_name}")
+                else:
+                    class_details.append(f"{count} {class_name}s")
+            
+            detection_message += ", ".join(class_details)
+            
+            print(f"Detection result: {detection_message}")
+            speak(detection_message)
+            
+            # 图像模式下确保分割模式保持开启
+            segmentation_mode = True
+            
+            # 明确标记分割为活动状态
+            segmentation_active = True
+            
+            # 确保不会意外清除结果
+            continuous_segmentation = False
+            
+            return current_results
+        else:
+            # 相机模式 - 连续处理帧
+            while not stop_event.is_set():
+                if frame_buffer is None:
+                    time.sleep(0.1)
+                    continue
+                    
+                # 处理当前帧
+                try:
+                    # 添加超时检查，长时间找不到则停止
+                    if time.time() - segmentation_start_time > 30 and not first_detection:
+                        print("Segmentation timeout - no objects found within 30 seconds.")
+                        speak("I couldn't find the objects you're looking for after searching for 30 seconds.")
+                        break
+                        
+                    # 预测结果
+                    results = segmentation_model.predict(
+                        source=frame_buffer,
+                        save=False,
+                        show=False,
+                        verbose=False,
+                        conf=0.15,
+                        classes=target_classes,
+                        retina_masks=True
+                    )
+                    
+                    # 添加结果检查
+                    if results is None or len(results) == 0:
+                        # 处理没有结果的情况
+                        overlay_frame = None  # 清除叠加层
+                        detection_buffer.append(None)  # 将空结果添加到缓冲区
+                        continue
+                    
+                    # 检查是否找到了任何物体
+                    if len(results[0].boxes) == 0:
+                        # 没有找到物体，清除叠加层并继续下一帧
+                        overlay_frame = None
+                        detection_buffer.append(None)  # 将空结果添加到缓冲区
+                        continue
+                    
+                    # 更新当前结果
+                    current_results = results[0] if len(results) > 0 else None
+                    
+                    # 将当前结果添加到缓冲区
+                    if current_results is not None:
+                        detection_buffer.append(current_results)
+                    
+                    # 处理分割结果并更新叠加层
+                    overlay_frame = process_segmentation_results(current_results, frame_buffer)
+                    
+                    # 如果找到物体，通知用户（仅第一次）
+                    if current_results is not None and len(current_results.boxes) > 0 and not first_detection:
+                        first_detection = True
+                        
+                        # 统计检测到的每种类别的数量
+                        found_classes = {}
+                        for cls in current_results.boxes.cls:
+                            class_id = int(cls)
+                            class_name = [name for name, id in CLASSES.items() if id == class_id][0]
+                            found_classes[class_name] = found_classes.get(class_name, 0) + 1
+                        
+                        # 构建检测结果消息
+                        detection_message = "I found "
+                        class_details = []
+                        for class_name, count in found_classes.items():
+                            if count == 1:
+                                class_details.append(f"a {class_name}")
+                            else:
+                                class_details.append(f"{count} {class_name}s")
+                        
+                        detection_message += ", ".join(class_details)
+                        
+                        print(f"Detection result: {detection_message}")
+                        speak(detection_message)
+                    
+                    # 如果不是连续模式且已找到物体，则退出循环
+                    if not continuous_segmentation and first_detection:
+                        break
+                    
+                except Exception as e:
+                    # 只在非NoneType错误时打印错误信息
+                    if "object of type 'NoneType' has no len()" not in str(e):
+                        print(f"Segmentation processing error: {e}")
+                    # 继续处理下一帧
+                    continue
+                    
+                # 短暂休眠，减少CPU使用率
+                time.sleep(0.05)
+                
     except Exception as e:
         # 捕获其他异常
         print(f"Segmentation error: {e}")
@@ -943,30 +1076,41 @@ def start_segmentation(prompt):
             overlay_frame = None  # 如果不是连续模式，清除叠加层
         return current_results
 
-# 修改stop_segmentation函数
+# 修改stop_segmentation函数，确保在图像模式下不清除叠加层
 def stop_segmentation():
-    """停止分割并清除显示结果"""
-    global stop_event, overlay_frame, continuous_segmentation
+    """停止分割但在图像模式下保持显示结果"""
+    global stop_event, overlay_frame, continuous_segmentation, segmentation_mode, IMAGE_MODE, segmentation_active
     
     stop_event.set()  # Signal thread to stop
     continuous_segmentation = False  # 禁用连续分割模式
-    overlay_frame = None  # 清除叠加层
+    
+    # 在图像模式下，保持分割结果和状态
+    if not IMAGE_MODE:
+        overlay_frame = None  # 只在相机模式下清除叠加层
+        segmentation_active = False
+        segmentation_mode = False
+    
     speak("Stopping segmentation")
 
 def get_instance_count(class_name):
-    """获取当前场景中特定类别的实例数量，使用多帧缓冲技术"""
-    # 获取最佳检测结果（物体最多的那一帧）
-    best_result = get_best_detection()
+    """获取当前场景中特定类别的实例数量"""
+    global current_results, segmentation_active
     
-    if best_result is None:
-        return 0
-        
+    # 首先检查是否有活动的分割结果
+    if not segmentation_active or current_results is None:
+        if IMAGE_MODE:
+            # 在图像模式下，如果没有分割结果，提示用户先进行分割
+            return "Please ask me to find objects in this image first."
+        else:
+            return "I don't see any objects currently. Try asking me to find objects first."
+    
+    # 获取类别ID
     class_id = CLASSES.get(class_name.lower())
     if class_id is None:
-        return 0
-        
+        return f"I don't recognize the object type '{class_name}'."
+    
     # 统计指定类别的实例数量
-    count = sum(1 for cls in best_result.boxes.cls if int(cls) == class_id)
+    count = sum(1 for cls in current_results.boxes.cls if int(cls) == class_id)
     return count
 
 def format_count_response(count, class_name):
@@ -1154,39 +1298,52 @@ def get_relative_position(target_box, other_boxes, other_classes):
         return f" between the {left_class_name} and the {right_class_name}"
 
 def get_object_positions(class_name):
-    """获取特定类别物体的位置描述，使用多帧缓冲技术"""
-    global overlay_frame  # 需要修改overlay_frame来添加箭头
+    """获取特定类别物体的位置描述"""
+    global overlay_frame, current_results, segmentation_active, frame_buffer
     
-    # 获取最佳检测结果（物体最多的那一帧）
-    best_result = get_best_detection()
+    # 首先检查是否有活动的分割结果
+    if not segmentation_active or current_results is None:
+        if IMAGE_MODE:
+            # 在图像模式下，如果没有分割结果，提示用户先进行分割
+            speak("Please ask me to find objects in this image first.")
+            return "Please ask me to find objects in this image first."
+        else:
+            return "I don't see any objects currently. Try asking me to find objects first."
     
-    if best_result is None:
-        return "I don't see any objects currently being segmented."
-        
+    # 获取类别ID
     class_id = CLASSES.get(class_name.lower())
     if class_id is None:
         return f"I don't recognize the object type '{class_name}'."
-        
-    # 获取所有该类别的边界框和其他类别的边界框
+    
+    # 获取指定类别的所有边界框
     target_boxes = []
     target_centers = []
     other_boxes = []
     other_classes = []
     
+    # 检查帧缓冲区
+    if frame_buffer is None:
+        return "No image is currently available."
+        
+    # 获取图像尺寸
     height, width = frame_buffer.shape[:2]
     
-    for box, cls in zip(best_result.boxes.data, best_result.boxes.cls):
+    # 处理current_results中的boxes
+    for i, cls in enumerate(current_results.boxes.cls):
         if int(cls) == class_id:
+            box = current_results.boxes.xyxy[i].cpu().numpy()
             target_boxes.append(box)
-            x1, y1, x2, y2 = map(int, box[:4])
+            x1, y1, x2, y2 = map(int, box)
             target_centers.append(((x1 + x2) / 2, (y1 + y2) / 2))
         else:
+            box = current_results.boxes.xyxy[i].cpu().numpy()
             other_boxes.append(box)
-            other_classes.append(cls)
+            other_classes.append(int(cls))
     
+    # 如果没有找到目标物体
     if not target_boxes:
         return f"I don't see any {class_name} in the current scene."
-        
+    
     # 如果只有一个目标物体
     if len(target_boxes) == 1:
         x1, y1, x2, y2 = map(int, target_boxes[0][:4])
@@ -1371,6 +1528,30 @@ def start_listening():
                 chat_history.append(f"User: {clean_prompt}")
                 print(f'User: {clean_prompt}')
                 
+                # 处理图像模式特定命令
+                if clean_prompt.lower() == "image mode":
+                    toggle_image_mode()
+                    continue
+                elif clean_prompt.lower() == "camera mode":
+                    if IMAGE_MODE:
+                        toggle_image_mode()  # 切换回相机模式
+                    else:
+                        speak("Already in camera mode.")
+                    continue
+                elif clean_prompt.lower() in ["next", "next image"]:
+                    if IMAGE_MODE:
+                        next_image()
+                    else:
+                        speak("Please switch to image mode first.")
+                    continue
+                elif clean_prompt.lower() in ["previous", "prev", "prev image"]:
+                    if IMAGE_MODE:
+                        prev_image()
+                    else:
+                        speak("Please switch to image mode first.")
+                    continue
+                
+                # 处理原有命令
                 call = function_call(clean_prompt)
                 
                 # 添加对describe frame的处理
@@ -1388,9 +1569,13 @@ def start_listening():
                     break
                 
                 if 'take screenshot' in call:
-                    print('Taking screenshot...')
-                    take_screenshot()
-                    visual_context = vision_prompt(prompt=clean_prompt, photo_path='screenshot.png')
+                    # 在图像模式下，不需要截图，直接使用当前图片
+                    if IMAGE_MODE:
+                        visual_context = vision_prompt(prompt=clean_prompt, photo_path=image_files[current_image_index])
+                    else:
+                        print('Taking screenshot...')
+                        take_screenshot()
+                        visual_context = vision_prompt(prompt=clean_prompt, photo_path='screenshot.png')
                 elif 'real-time segmentation' in call:
                     # Start segmentation in a new thread to avoid blocking
                     segmentation_thread_instance = threading.Thread(target=segmentation_thread, kwargs={'prompt': clean_prompt})
@@ -1573,16 +1758,21 @@ def handle_audio(audio):
         
 # 添加以下函数来处理"describe frame"功能
 def describe_frame():
-    """分析并描述当前视频帧"""
-    global frame_buffer
+    """分析并描述当前视频帧或图片"""
+    global frame_buffer, IMAGE_MODE, current_image_index
     
     if frame_buffer is None:
         speak("I can't see anything right now.")
         return
     
-    # 保存当前帧
-    frame_path = 'current_frame_analysis.png'
-    cv2.imwrite(frame_path, frame_buffer)
+    # 确定要分析的图像路径
+    if IMAGE_MODE:
+        # 图像模式 - 直接使用当前图片文件
+        frame_path = image_files[current_image_index]
+    else:
+        # 相机模式 - 保存当前帧
+        frame_path = 'current_frame_analysis.png'
+        cv2.imwrite(frame_path, frame_buffer)
     
     print("Analyzing what I can see...")
     
@@ -1599,7 +1789,7 @@ def describe_frame():
             {
                 "role": "user", 
                 "content": [
-                    {"type": "text", "text": "Describe what you see in the current frame with a very concise description in one sentence."},
+                    {"type": "text", "text": "Describe what you see in this image with a very concise description."},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
                 ]
             }
@@ -1620,26 +1810,32 @@ def describe_frame():
         print(error_message)
         speak(error_message)
     
-    # 清理临时文件
-    try:
-        os.remove(frame_path)
-    except:
-        pass
+    # 只有在相机模式下才清理临时文件
+    if not IMAGE_MODE:
+        try:
+            os.remove(frame_path)
+        except:
+            pass
 
-# 添加新函数来回答关于视频帧的具体问题
+# 修改answer_visual_question函数，以支持图像模式
 def answer_visual_question(question):
-    """分析当前视频帧并回答用户的具体问题"""
-    global frame_buffer
+    """分析当前视频帧或图片并回答用户的具体问题"""
+    global frame_buffer, IMAGE_MODE, current_image_index
     
     if frame_buffer is None:
         speak("I can't see anything right now to answer your question.")
         return
     
-    # 保存当前帧
-    frame_path = 'current_frame_question.png'
-    cv2.imwrite(frame_path, frame_buffer)
+    # 确定要分析的图像路径
+    if IMAGE_MODE:
+        # 图像模式 - 直接使用当前图片文件
+        frame_path = image_files[current_image_index]
+    else:
+        # 相机模式 - 保存当前帧
+        frame_path = 'current_frame_question.png'
+        cv2.imwrite(frame_path, frame_buffer)
     
-    print(f"Analyzing frame to answer: {question}")
+    print(f"Analyzing image to answer: {question}")
     
     try:
         # 准备API请求
@@ -1675,12 +1871,13 @@ def answer_visual_question(question):
         print(error_message)
         speak(error_message)
     
-    # 清理临时文件
-    try:
-        os.remove(frame_path)
-    except:
-        pass
-        
+    # 只有在相机模式下才清理临时文件
+    if not IMAGE_MODE:
+        try:
+            os.remove(frame_path)
+        except:
+            pass
+
 # 添加新的实例推理函数
 def instance_reasoning(question, target_class):
     """分析特定类别的每个实例并提供描述"""
@@ -1854,4 +2051,174 @@ def cache_instance_reasoning(target_class, description):
     with open(cache_file, 'w') as f:
         json.dump(memory, f, indent=2)
         
-start_listening()
+def load_test_images():
+    """加载测试图片文件夹中的所有图片"""
+    global image_files
+    
+    # 测试图片目录
+    image_dir = "../test_images"
+    
+    # 确保目录存在
+    if not os.path.exists(image_dir):
+        os.makedirs(image_dir, exist_ok=True)
+        print(f"Created image directory: {image_dir}")
+        print("Please add some images to the test_images folder.")
+        return False
+    
+    # 支持的图片格式
+    supported_formats = ['.jpg', '.jpeg', '.png', '.bmp']
+    
+    # 获取所有支持格式的图片
+    image_files = []
+    for file in os.listdir(image_dir):
+        ext = os.path.splitext(file)[1].lower()
+        if ext in supported_formats:
+            image_files.append(os.path.join(image_dir, file))
+    
+    # 排序文件以便有序浏览
+    image_files.sort()
+    
+    if not image_files:
+        print("No image files found in the test_images folder.")
+        return False
+    
+    print(f"Loaded {len(image_files)} images from {image_dir}")
+    return True
+
+def load_image(index):
+    """加载指定索引的图片"""
+    global current_image, frame_buffer
+    
+    if not image_files or index < 0 or index >= len(image_files):
+        return None
+    
+    try:
+        # 读取图片
+        img = cv2.imread(image_files[index])
+        if img is None:
+            print(f"Failed to load image: {image_files[index]}")
+            return None
+        
+        # 调整图片大小以适应显示窗口
+        height, width = img.shape[:2]
+        
+        # 如果图片太大，等比例缩小
+        max_width, max_height = 1280, 720
+        if width > max_width or height > max_height:
+            ratio = min(max_width / width, max_height / height)
+            new_width = int(width * ratio)
+            new_height = int(height * ratio)
+            img = cv2.resize(img, (new_width, new_height))
+        
+        # 更新当前图片和帧缓冲
+        current_image = img
+        frame_buffer = img.copy()
+        
+        # 显示文件名
+        file_name = os.path.basename(image_files[index])
+        print(f"Displaying image {index+1}/{len(image_files)}: {file_name}")
+        
+        return img
+    except Exception as e:
+        print(f"Error loading image: {e}")
+        return None
+
+def next_image():
+    """显示下一张图片"""
+    global current_image_index, overlay_frame, segmentation_mode, segmentation_active
+    
+    if not image_files:
+        speak("No images available in the test folder.")
+        return False
+    
+    # 切换到下一个索引
+    next_index = (current_image_index + 1) % len(image_files)
+    
+    # 加载新图片
+    if load_image(next_index) is not None:
+        current_image_index = next_index
+        overlay_frame = None  # 清除上一个图片的叠加层
+        segmentation_mode = False  # 退出分割模式
+        segmentation_active = False  # 清除分割活动状态
+        return True
+    
+    return False
+
+def prev_image():
+    """显示上一张图片"""
+    global current_image_index, overlay_frame, segmentation_mode, segmentation_active
+    
+    if not image_files:
+        speak("No images available in the test folder.")
+        return False
+    
+    # 切换到上一个索引
+    prev_index = (current_image_index - 1) % len(image_files)
+    
+    # 加载新图片
+    if load_image(prev_index) is not None:
+        current_image_index = prev_index
+        overlay_frame = None  # 清除上一个图片的叠加层
+        segmentation_mode = False  # 退出分割模式
+        segmentation_active = False  # 清除分割活动状态
+        return True
+    
+    return False
+
+def toggle_image_mode():
+    """切换图像模式和相机模式"""
+    global IMAGE_MODE, overlay_frame, segmentation_mode, segmentation_active
+    
+    # 切换模式
+    IMAGE_MODE = not IMAGE_MODE
+    
+    # 清除叠加层和分割状态
+    overlay_frame = None
+    segmentation_mode = False
+    segmentation_active = False
+    
+    if IMAGE_MODE:
+        # 进入图像模式，加载图片
+        if load_test_images():
+            load_image(current_image_index)
+            speak("Switched to image mode. Use 'next' or 'previous' to navigate images.")
+        else:
+            IMAGE_MODE = False  # 如果没有图片，回到相机模式
+            speak("No images found. Staying in camera mode.")
+    else:
+        # 返回相机模式
+        speak("Switched back to camera mode.")
+    
+    return IMAGE_MODE
+
+# 在程序开始执行时，检查测试图像文件夹
+if __name__ == "__main__":
+    print("Ada Image Mode is starting...")
+    print("You can switch between camera and image modes using commands:")
+    print("  - 'image mode' to switch to image browsing")
+    print("  - 'camera mode' to switch back to webcam")
+    print("In image mode, use 'next' and 'previous' to navigate images")
+    
+    # 检查图像文件夹
+    if os.path.exists("../test_images"):
+        images_count = len([f for f in os.listdir('../test_images') if f.lower().endswith(('.jpg','.jpeg','.png','.bmp'))])
+        print(f"Found test_images folder with {images_count} images")
+        
+        # 默认加载图像
+        if images_count > 0:
+            load_test_images()
+            # 预加载第一张图片
+            load_image(0)
+            print("Starting in image mode - first image loaded")
+        else:
+            print("No images found in test_images folder, defaulting to camera mode")
+            IMAGE_MODE = False  # 如果没有图片，切换回相机模式
+    else:
+        print("No test_images folder found. Creating one...")
+        os.makedirs("../test_images", exist_ok=True)
+        print("Please add some images to the ../test_images folder for image mode.")
+        # 由于没有图片，切换回相机模式
+        IMAGE_MODE = False
+    
+    # 启动程序
+    start_listening()
