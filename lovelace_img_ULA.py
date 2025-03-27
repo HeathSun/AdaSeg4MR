@@ -70,6 +70,14 @@ class AdaImgTester:
         
         # 跟踪已找到的物体类别
         self.found_objects = set()
+        
+        # 加载非标准类别映射
+        self.non_standard_classes = {}
+        try:
+            with open('non-standard_classes.json', 'r') as f:
+                self.non_standard_classes = json.load(f)
+        except Exception as e:
+            print(f"Warning: Could not load non-standard classes: {e}")
 
     def create_test_subset(self, num_classes=10, num_images_per_class=5):
         """为指定数量的类别创建一个小型测试集（每类num_images_per_class张图片）"""
@@ -120,25 +128,64 @@ class AdaImgTester:
         return test_images_info
 
     def generate_initial_questions(self, classes_in_image):
-        """生成前两个测试问题"""
+        """生成前两个测试问题，使用非标准类别名称来测试ada_img的类别识别能力"""
         questions = []
         self.found_objects = set()  # 重置找到的物体集合
+        self.standard_to_nonstandard_map = {}  # 存储标准名称到非标准名称的映射关系
         
-        # 第一个问题：尽可能找3个物体
+        # 第一个问题：尽可能找3个物体，使用非标准名称
         if len(classes_in_image) >= 3:
             selected_classes = random.sample(classes_in_image, 3)
-            # 记录将要查找的类别
+            nonstandard_classes = []
+            
+            # 记录将要查找的类别 (使用标准名称)
             self.found_objects.update(selected_classes)
-            questions.append(f"find the {selected_classes[0]}, the {selected_classes[1]} and the {selected_classes[2]}")
+            
+            # 为每个标准类别选择一个非标准名称
+            for cls in selected_classes:
+                if cls in self.non_standard_classes and self.non_standard_classes[cls]:
+                    # 随机选择一个非标准名称
+                    nonstandard_name = random.choice(self.non_standard_classes[cls])
+                    nonstandard_classes.append(nonstandard_name)
+                    # 记录非标准名称到标准名称的映射
+                    self.standard_to_nonstandard_map[cls] = nonstandard_name
+                else:
+                    # 找不到非标准名称，使用原始名称
+                    nonstandard_classes.append(cls)
+                    self.standard_to_nonstandard_map[cls] = cls
+            
+            questions.append(f"find the {nonstandard_classes[0]}, the {nonstandard_classes[1]} and the {nonstandard_classes[2]}")
         elif len(classes_in_image) == 2:
             selected_classes = classes_in_image
+            nonstandard_classes = []
+            
             self.found_objects.update(selected_classes)
-            questions.append(f"find the {selected_classes[0]} and the {selected_classes[1]}")
+            
+            # 为每个标准类别选择一个非标准名称
+            for cls in selected_classes:
+                if cls in self.non_standard_classes and self.non_standard_classes[cls]:
+                    nonstandard_name = random.choice(self.non_standard_classes[cls])
+                    nonstandard_classes.append(nonstandard_name)
+                    self.standard_to_nonstandard_map[cls] = nonstandard_name
+                else:
+                    nonstandard_classes.append(cls)
+                    self.standard_to_nonstandard_map[cls] = cls
+            
+            questions.append(f"find the {nonstandard_classes[0]} and the {nonstandard_classes[1]}")
         else:
             # 只有一个类别
             class_name = classes_in_image[0]
             self.found_objects.add(class_name)
-            questions.append(f"find the {class_name}")
+            
+            # 选择非标准名称
+            if class_name in self.non_standard_classes and self.non_standard_classes[class_name]:
+                nonstandard_name = random.choice(self.non_standard_classes[class_name])
+                self.standard_to_nonstandard_map[class_name] = nonstandard_name
+            else:
+                nonstandard_name = class_name
+                self.standard_to_nonstandard_map[class_name] = class_name
+            
+            questions.append(f"find the {nonstandard_name}")
         
         # 第二个问题：计数已找到的物体
         found_objects_list = list(self.found_objects)
@@ -978,9 +1025,6 @@ class AdaImgTester:
         # 创建测试子集
         test_images_info = self.create_test_subset(num_classes, num_images_per_class)
         
-        # 将test_images_info保存为实例属性
-        self.test_images_info = test_images_info
-        
         # 处理每个测试图像
         results = []
         metrics = []
@@ -1000,9 +1044,6 @@ class AdaImgTester:
             # 更新CSV中的类别准确率
             class_acc = metric.get('class_accuracy', 0.0)
             self.update_csv_class_accuracy(image_filename, class_acc)
-        
-        # 保存metrics为实例属性，使其他方法可以访问
-        self.metrics = metrics
         
         # 保存总体结果和指标
         with open(os.path.join(RESULTS_DIR, "test_results.json"), 'w') as f:
@@ -1036,11 +1077,6 @@ class AdaImgTester:
         print(f"Average mask IoU: {avg_mask_iou:.4f}")
         print(f"Average class accuracy: {avg_class_accuracy:.4f}")
         
-        # 在run_test方法的末尾，添加生成三个额外报告的调用
-        self.generate_by_image_report(results)
-        self.generate_by_classes_report(results, metrics)
-        self.generate_total_report(results)
-        
         return {
             'results': results,
             'metrics': metrics,
@@ -1066,292 +1102,6 @@ class AdaImgTester:
             writer = csv.writer(csvfile)
             writer.writerow(header)
             writer.writerows(rows)
-
-    def generate_by_image_report(self, results):
-        """生成按图像分类的报告"""
-        report_path = os.path.join(RESULTS_DIR, 'by_image.csv')
-        
-        with open(report_path, 'w', newline='') as csvfile:
-            fieldnames = ['image_filename', 'bbox_iou', 'mask_iou', 'class_accuracy', 'number_variation', 
-                          'q1_response_time', 'q2_response_time', 'q3_response_time', 'q4_response_time']
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            
-            for result in results:
-                img_filename = result['image_filename']
-                base_name = os.path.splitext(img_filename)[0]
-                
-                # 获取class accuracy
-                metric = next((m for m in self.metrics if m.get('image_filename') == img_filename), None)
-                class_accuracy = metric.get('class_accuracy', 0) if metric else 0
-                
-                # 获取所有QA数据
-                qa_data = []
-                qa_files = [f for f in os.listdir(self.timing_dir) if f.startswith(base_name) and f.endswith('_qa.json')]
-                
-                for qa_file in sorted(qa_files):  # 按文件名排序确保问题顺序
-                    with open(os.path.join(self.timing_dir, qa_file), 'r') as f:
-                        qa_data.append(json.load(f))
-                
-                # 获取timing数据
-                timing = result.get('timing', {})
-                
-                # 计算数量变化
-                gt_classes = {name: 0 for name in self.found_objects}
-                pred_classes = {name: 0 for name in self.found_objects}
-                
-                # 获取真实计数 - 从coco数据集
-                img_id = self.test_images_info.get(img_filename, {}).get('img_id')
-                
-                if img_id:
-                    ann_ids = self.coco.getAnnIds(imgIds=img_id)
-                    anns = self.coco.loadAnns(ann_ids)
-                    for ann in anns:
-                        cat_id = ann['category_id']
-                        cat_name = next((cat['name'] for cat in self.categories if cat['id'] == cat_id), None)
-                        if cat_name in gt_classes:
-                            gt_classes[cat_name] += 1
-                
-                # 获取预测计数 - 从问题2的答案
-                if len(qa_data) > 1:
-                    for obj_name in self.found_objects:
-                        if "how many" in qa_data[1]['question'] and obj_name in qa_data[1]['question']:
-                            answer = qa_data[1]['answer']
-                            # 尝试从回答中提取数字
-                            count_match = re.search(r'There are (\d+)', answer)
-                            if count_match:
-                                pred_classes[obj_name] = int(count_match.group(1))
-                
-                # 计算数量变化
-                num_variations = []
-                for obj_name in self.found_objects:
-                    if gt_classes[obj_name] > 0 or pred_classes[obj_name] > 0:
-                        num_variations.append(abs(gt_classes[obj_name] - pred_classes[obj_name]))
-                
-                avg_num_variation = sum(num_variations) / len(num_variations) if num_variations else 0
-                
-                # 获取IoU值
-                bbox_iou = qa_data[0].get('bbox_iou', 0) if len(qa_data) > 0 else 0
-                mask_iou = qa_data[0].get('mask_iou', 0) if len(qa_data) > 0 else 0
-                
-                # 写入行数据
-                row = {
-                    'image_filename': img_filename,
-                    'bbox_iou': bbox_iou if bbox_iou is not None else 0,
-                    'mask_iou': mask_iou if mask_iou is not None else 0,
-                    'class_accuracy': class_accuracy,
-                    'number_variation': avg_num_variation,
-                    'q1_response_time': timing.get('q1', 0),
-                    'q2_response_time': timing.get('q2', 0),
-                    'q3_response_time': timing.get('q3', 0),
-                    'q4_response_time': timing.get('q4', 0)
-                }
-                writer.writerow(row)
-            
-            print(f"By Image report created at {report_path}")
-
-    def generate_by_classes_report(self, results, metrics):
-        """生成按类别分类的报告"""
-        report_path = os.path.join(RESULTS_DIR, 'by_classes.csv')
-        
-        # 按类别整理数据
-        class_data = {}
-        for class_name in sorted(self.cat_name_to_id.keys(), key=lambda x: self.cat_name_to_id[x]):  # 按COCO顺序排序
-            class_data[class_name] = {
-                'bbox_ious': [],
-                'mask_ious': [],
-                'class_accuracies': [],
-                'num_variations': [],
-                'q1_times': [],
-                'q2_times': [],
-                'q3_times': [],
-                'q4_times': []
-            }
-        
-        # 收集每个类别的数据
-        for result in results:
-            img_filename = result['image_filename']
-            base_name = os.path.splitext(img_filename)[0]
-            
-            # 获取图像中存在的类别
-            classes_in_image = result.get('classes_in_image', [])
-            timing = result.get('timing', {})
-            
-            # 获取所有QA数据
-            qa_files = [f for f in os.listdir(self.timing_dir) if f.startswith(base_name) and f.endswith('_qa.json')]
-            qa_data = []
-            
-            for qa_file in sorted(qa_files):
-                with open(os.path.join(self.timing_dir, qa_file), 'r') as f:
-                    qa_data.append(json.load(f))
-            
-            if not qa_data:
-                continue
-            
-            # 获取Q1 IoU数据并分配给相应类别
-            for class_name in classes_in_image:
-                if class_name in class_data:
-                    if len(qa_data) > 0:
-                        bbox_iou = qa_data[0].get('bbox_iou')
-                        mask_iou = qa_data[0].get('mask_iou')
-                        if bbox_iou is not None:
-                            class_data[class_name]['bbox_ious'].append(bbox_iou)
-                        if mask_iou is not None:
-                            class_data[class_name]['mask_ious'].append(mask_iou)
-                    
-                    # 获取响应时间
-                    class_data[class_name]['q1_times'].append(timing.get('q1', 0))
-                    class_data[class_name]['q2_times'].append(timing.get('q2', 0))
-                    class_data[class_name]['q3_times'].append(timing.get('q3', 0))
-                    class_data[class_name]['q4_times'].append(timing.get('q4', 0))
-                    
-                    # 从metrics中获取数量变化
-                    metric = next((m for m in metrics if m.get('image_filename') == img_filename), None)
-                    if metric and 'class_counts' in metric:
-                        class_counts = metric['class_counts']
-                        if class_name in class_counts:
-                            gt_count = class_counts[class_name].get('gt_count', 0)
-                            pred_count = class_counts[class_name].get('pred_count', 0)
-                            class_data[class_name]['num_variations'].append(abs(gt_count - pred_count))
-                    
-                    # 在收集每个类别数据时，添加class_accuracy
-                    if metric:
-                        class_accuracy = metric.get('class_accuracy', 0)
-                        class_data[class_name]['class_accuracies'].append(class_accuracy)
-        
-        # 写入CSV
-        with open(report_path, 'w', newline='') as csvfile:
-            fieldnames = [
-                'class_name', 
-                'avg_bbox_iou', 'avg_mask_iou', 'avg_class_accuracy', 'avg_num_variation',
-                'avg_q1_time', 'avg_q2_time', 'avg_q3_time', 'avg_q4_time',
-                'median_bbox_iou', 'median_mask_iou', 'median_class_accuracy', 'median_num_variation',
-                'median_q1_time', 'median_q2_time', 'median_q3_time', 'median_q4_time'
-            ]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            
-            # 计算并写入每个类别的平均值和中位数
-            for class_name, data in class_data.items():
-                if data['bbox_ious'] or data['mask_ious'] or data['q1_times']:  # 如果有任何数据
-                    row = {'class_name': class_name}
-                    
-                    # 计算平均值
-                    row['avg_bbox_iou'] = np.mean(data['bbox_ious']) if data['bbox_ious'] else 0
-                    row['avg_mask_iou'] = np.mean(data['mask_ious']) if data['mask_ious'] else 0
-                    row['avg_class_accuracy'] = np.mean(data['class_accuracies']) if data['class_accuracies'] else 0
-                    row['avg_num_variation'] = np.mean(data['num_variations']) if data['num_variations'] else 0
-                    row['avg_q1_time'] = np.mean(data['q1_times']) if data['q1_times'] else 0
-                    row['avg_q2_time'] = np.mean(data['q2_times']) if data['q2_times'] else 0
-                    row['avg_q3_time'] = np.mean(data['q3_times']) if data['q3_times'] else 0
-                    row['avg_q4_time'] = np.mean(data['q4_times']) if data['q4_times'] else 0
-                    
-                    # 计算中位数
-                    row['median_bbox_iou'] = np.median(data['bbox_ious']) if data['bbox_ious'] else 0
-                    row['median_mask_iou'] = np.median(data['mask_ious']) if data['mask_ious'] else 0
-                    row['median_class_accuracy'] = np.median(data['class_accuracies']) if data['class_accuracies'] else 0
-                    row['median_num_variation'] = np.median(data['num_variations']) if data['num_variations'] else 0
-                    row['median_q1_time'] = np.median(data['q1_times']) if data['q1_times'] else 0
-                    row['median_q2_time'] = np.median(data['q2_times']) if data['q2_times'] else 0
-                    row['median_q3_time'] = np.median(data['q3_times']) if data['q3_times'] else 0
-                    row['median_q4_time'] = np.median(data['q4_times']) if data['q4_times'] else 0
-                    
-                    writer.writerow(row)
-            
-            print(f"By Classes report created at {report_path}")
-
-    def generate_total_report(self, results):
-        """生成总体报告"""
-        report_path = os.path.join(RESULTS_DIR, 'total.csv')
-        
-        # 收集所有数据
-        all_data = {
-            'bbox_ious': [],
-            'mask_ious': [],
-            'num_variations': [],
-            'q1_times': [],
-            'q2_times': [],
-            'q3_times': [],
-            'q4_times': [],
-            'class_accuracies': []
-        }
-        
-        # 处理每个图像的结果
-        for result in results:
-            img_filename = result['image_filename']
-            base_name = os.path.splitext(img_filename)[0]
-            timing = result.get('timing', {})
-            
-            # 获取QA数据
-            qa_files = [f for f in os.listdir(self.timing_dir) if f.startswith(base_name) and f.endswith('_qa.json')]
-            qa_data = []
-            
-            for qa_file in sorted(qa_files):
-                with open(os.path.join(self.timing_dir, qa_file), 'r') as f:
-                    qa_data.append(json.load(f))
-            
-            if not qa_data:
-                continue
-            
-            # 收集IoU数据
-            if len(qa_data) > 0:
-                bbox_iou = qa_data[0].get('bbox_iou')
-                mask_iou = qa_data[0].get('mask_iou')
-                if bbox_iou is not None:
-                    all_data['bbox_ious'].append(bbox_iou)
-                if mask_iou is not None:
-                    all_data['mask_ious'].append(mask_iou)
-            
-            # 收集响应时间
-            all_data['q1_times'].append(timing.get('q1', 0))
-            all_data['q2_times'].append(timing.get('q2', 0))
-            all_data['q3_times'].append(timing.get('q3', 0))
-            all_data['q4_times'].append(timing.get('q4', 0))
-            
-            # 收集数量变化 - 从by_image.csv
-            by_image_path = os.path.join(RESULTS_DIR, 'by_image.csv')
-            if os.path.exists(by_image_path):
-                with open(by_image_path, 'r', newline='') as csvfile:
-                    reader = csv.DictReader(csvfile)
-                    for row in reader:
-                        if row['image_filename'] == img_filename:
-                            if row['number_variation']:
-                                all_data['num_variations'].append(float(row['number_variation']))
-            
-            # 在收集数据时添加class_accuracy
-            for qa in qa_data:
-                if 'class_accuracy' in qa:
-                    all_data['class_accuracies'].append(qa['class_accuracy'])
-        
-        # 写入CSV
-        with open(report_path, 'w', newline='') as csvfile:
-            fieldnames = [
-                'metric', 'value'
-            ]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            
-            # 计算并写入平均值
-            writer.writerow({'metric': 'avg_bbox_iou', 'value': np.mean(all_data['bbox_ious']) if all_data['bbox_ious'] else 0})
-            writer.writerow({'metric': 'avg_mask_iou', 'value': np.mean(all_data['mask_ious']) if all_data['mask_ious'] else 0})
-            writer.writerow({'metric': 'avg_num_variation', 'value': np.mean(all_data['num_variations']) if all_data['num_variations'] else 0})
-            writer.writerow({'metric': 'avg_q1_time', 'value': np.mean(all_data['q1_times']) if all_data['q1_times'] else 0})
-            writer.writerow({'metric': 'avg_q2_time', 'value': np.mean(all_data['q2_times']) if all_data['q2_times'] else 0})
-            writer.writerow({'metric': 'avg_q3_time', 'value': np.mean(all_data['q3_times']) if all_data['q3_times'] else 0})
-            writer.writerow({'metric': 'avg_q4_time', 'value': np.mean(all_data['q4_times']) if all_data['q4_times'] else 0})
-            writer.writerow({'metric': 'avg_class_accuracy', 'value': np.mean(all_data['class_accuracies']) if all_data['class_accuracies'] else 0})
-            
-            # 计算并写入中位数
-            writer.writerow({'metric': 'median_bbox_iou', 'value': np.median(all_data['bbox_ious']) if all_data['bbox_ious'] else 0})
-            writer.writerow({'metric': 'median_mask_iou', 'value': np.median(all_data['mask_ious']) if all_data['mask_ious'] else 0})
-            writer.writerow({'metric': 'median_num_variation', 'value': np.median(all_data['num_variations']) if all_data['num_variations'] else 0})
-            writer.writerow({'metric': 'median_q1_time', 'value': np.median(all_data['q1_times']) if all_data['q1_times'] else 0})
-            writer.writerow({'metric': 'median_q2_time', 'value': np.median(all_data['q2_times']) if all_data['q2_times'] else 0})
-            writer.writerow({'metric': 'median_q3_time', 'value': np.median(all_data['q3_times']) if all_data['q3_times'] else 0})
-            writer.writerow({'metric': 'median_q4_time', 'value': np.median(all_data['q4_times']) if all_data['q4_times'] else 0})
-            writer.writerow({'metric': 'median_class_accuracy', 'value': np.median(all_data['class_accuracies']) if all_data['class_accuracies'] else 0})
-            
-            print(f"Total report created at {report_path}")
 
 
 if __name__ == "__main__":
