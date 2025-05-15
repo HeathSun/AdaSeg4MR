@@ -1,5 +1,6 @@
-# 忽略配置文件（API 密钥等）
+# 忽略包含API密钥和敏感信息的配置文件
 config.json
+instance_memory.json
 
 # 忽略 Python 生成的缓存文件
 __pycache__/
@@ -82,5 +83,28 @@ var/
 *.egg
 
 # 忽略系统文件
+.DS_Store
+Thumbs.db
+
+# Python缓存和虚拟环境
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# 录制和输出文件
+runs/
+*.wav
+*.mp4
+*.png
+
+# 操作系统文件
 .DS_Store
 Thumbs.db

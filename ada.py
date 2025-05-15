@@ -1,3 +1,5 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from groq import Groq
 from PIL import ImageGrab, Image
 from openai import OpenAI
@@ -20,7 +22,7 @@ segmentation_model = YOLO("yolo11m-seg.pt")
 
 wake_word = 'Lady Ada'
 # 在文件开头的全局变量区域添加摄像头选择
-CAMERA_SOURCE = 1  # 0: 内置摄像头, 1: 外接webcam, 2: DroidCam
+CAMERA_SOURCE = 0  # 0: 内置摄像头, 1: 外接webcam, 2: DroidCam
 
 def load_config():
     with open('config.json') as f:
@@ -34,7 +36,7 @@ web_cam = cv2.VideoCapture(CAMERA_SOURCE)
 web_cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 web_cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 # Add a global variable to control voice interaction
-use_voice_interaction = False # Set this to False to disable voice interaction
+use_voice_interaction = True # Set this to False to disable voice interaction
 stop_event = threading.Event()
 
 # 在全局变量区域添加以下内容
@@ -1247,6 +1249,7 @@ def handle_position_query(clean_prompt):
 # 在callback和start_listening中添加位置查询的处理
 def callback(recognizer, audio):
     try:
+        visual_context = None  # 修复未定义异常
         prompt_audio_path = 'prompt.wav'
         with open(prompt_audio_path, 'wb') as f:
             f.write(audio.get_wav_data())
@@ -1510,6 +1513,7 @@ def quit_program():
 def handle_audio(audio):
     """处理录制的音频"""
     try:
+        visual_context = None  # 修复未定义异常
         prompt_audio_path = 'prompt.wav'
         with open(prompt_audio_path, 'wb') as f:
             f.write(audio.get_wav_data())
@@ -1606,7 +1610,7 @@ def describe_frame():
         ]
         
         response = groq_client.chat.completions.create(
-            model="llama-3.2-90b-vision-preview",
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
             messages=messages,
             max_tokens=300
         )
@@ -1661,7 +1665,7 @@ def answer_visual_question(question):
         ]
         
         response = groq_client.chat.completions.create(
-            model="llama-3.2-90b-vision-preview",
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
             messages=messages,
             max_tokens=100
         )
@@ -1791,7 +1795,7 @@ def analyze_instance(image_path, class_name, position):
         ]
         
         response = groq_client.chat.completions.create(
-            model="llama-3.2-90b-vision-preview",
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
             messages=messages,
             max_tokens=50
         )
